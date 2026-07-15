@@ -396,7 +396,7 @@ def _migrate_llm_cache():
             "SELECT COUNT(*) FROM app_cache WHERE namespace='llm_match'")).scalar()
         if already:
             return
-        rows = conn.execute(text('SELECT desc, matched, provider FROM llm_cache')).fetchall()
+        rows = conn.execute(text('SELECT "desc", matched, provider FROM llm_cache')).fetchall()
         
         insert_sql = 'INSERT OR IGNORE INTO app_cache ' if DB_URL.startswith("sqlite") else 'INSERT INTO app_cache '
         on_conflict = '' if DB_URL.startswith("sqlite") else ' ON CONFLICT (namespace, key_hash) DO NOTHING'
