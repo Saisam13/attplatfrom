@@ -5,7 +5,7 @@ import { useRuns } from '../App'
 const PAGE = 100
 
 export default function RawDataPage() {
-  const { selectedRun } = useRuns()
+  const { selectedRun, runs, setSelectedId } = useRuns()
   const [rows, setRows] = useState<RawRow[]>([])
   const [total, setTotal] = useState(0)
   const [search, setSearch] = useState('')
@@ -55,6 +55,16 @@ export default function RawDataPage() {
         <button className="ghost" disabled={page === 0} onClick={() => setPage(p => p - 1)}>‹ Prev</button>
         <span className="dim">page {page + 1} / {Math.max(1, Math.ceil(total / PAGE))}</span>
         <button className="ghost" disabled={(page + 1) * PAGE >= total} onClick={() => setPage(p => p + 1)}>Next ›</button>
+        
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <label className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>Active run:</label>
+          <select value={selectedRun?.id ?? ''} onChange={e => setSelectedId(Number(e.target.value))} style={{ minWidth: 160 }}>
+            {runs.length === 0 && <option value="">— no runs yet —</option>}
+            {runs.map(r => (
+              <option key={r.id} value={r.id}>#{r.id} {r.name} ({r.status})</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="table-scroll">

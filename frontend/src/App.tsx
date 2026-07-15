@@ -50,7 +50,13 @@ export default function App() {
   const [userName, setUserNameState] = useState(user.get())
   const [askName, setAskName] = useState(!user.get())
   const [pinNeeded, setPinNeeded] = useState(false)
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('att_theme') as 'dark' | 'light') || 'dark')
   const prevStatuses = useRef<Record<number, string>>({})
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('att_theme', theme)
+  }, [theme])
 
   const toast = useCallback((kind: 'success' | 'error', text: string) => {
     const id = Date.now() + Math.random()
@@ -151,31 +157,17 @@ export default function App() {
             <div className="nav-group"> </div>
             <NavLink to="/settings">Settings</NavLink>
           </nav>
-          <div className="run-select">
-            <label>Active run</label>
-            <select
-              style={{ width: '100%', marginTop: 6 }}
-              value={selectedId ?? ''}
-              onChange={e => setSelectedId(Number(e.target.value))}
-            >
-              {runs.length === 0 && <option value="">— no runs yet —</option>}
-              {runs.map(r => (
-                <option key={r.id} value={r.id}>
-                  #{r.id} {r.name} ({r.status})
-                </option>
-              ))}
-            </select>
-            {selectedRun?.status === 'done' && (
-              <button className="btn" style={{ display: 'block', width: '100%', textAlign: 'center', marginTop: 10, fontSize: 13 }}
-                onClick={() => download(`/api/runs/${selectedRun.id}/export`, `ATT_Results_Run${selectedRun.id}.xlsx`)}>
-                ⬇ Export workbook
+          <div className="user-badge" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div>
+              <span className="dim">Signed in as</span>
+              <strong>{userName || '—'}</strong>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button className="ghost" style={{ flex: 1 }} onClick={() => setAskName(true)}>Change</button>
+              <button className="ghost" style={{ padding: '5px 8px', fontSize: 16 }} onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} title="Toggle theme">
+                {theme === 'dark' ? '☀️' : '🌙'}
               </button>
-            )}
-          </div>
-          <div className="user-badge">
-            <span className="dim">Signed in as</span>
-            <strong>{userName || '—'}</strong>
-            <button className="ghost" style={{ marginTop: 6 }} onClick={() => setAskName(true)}>Change</button>
+            </div>
           </div>
         </aside>
         <main className="main">

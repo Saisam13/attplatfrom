@@ -6,16 +6,24 @@ from sqlalchemy import (
     create_engine, Column, Integer, Float, String, Text, DateTime, Index,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+from dotenv import load_dotenv
+
+load_dotenv()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, 'data')
 os.makedirs(os.path.join(DATA_DIR, 'uploads'), exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, 'att.db')
 
-engine = create_engine(
-    f'sqlite:///{DB_PATH}',
-    connect_args={'check_same_thread': False},
-)
+DB_URL = os.environ.get('DATABASE_URL', f'sqlite:///{DB_PATH}')
+if DB_URL.startswith("postgres://"):
+    DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
+
+connect_args = {}
+if DB_URL.startswith("sqlite"):
+    connect_args = {'check_same_thread': False}
+
+engine = create_engine(DB_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 Base = declarative_base()
 
@@ -358,7 +366,11 @@ def _migrate():
     }
     with engine.connect() as conn:
         for table, cols in added.items():
-            existing = {r[1] for r in conn.execute(text(f'PRAGMA table_info({table})'))}
+            if DB_URL.startswith("sqlite"):
+                existing = {r[1] for r in conn.execute(text(f'PRAGMA table_info({table})'))}
+            else:
+                existing = {r[0] for r in conn.execute(text(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'"))}
+                
             if not existing:
                 continue  # table doesn't exist yet; create_all will make it current
             for col, ddl in cols:
@@ -373,8 +385,11 @@ def _migrate_llm_cache():
     import hashlib
     from sqlalchemy import text
     with engine.connect() as conn:
-        tables = {r[0] for r in conn.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table'"))}
+        if DB_URL.startswith("sqlite"):
+            tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+        else:
+            tables = {r[0] for r in conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))}
+            
         if 'llm_cache' not in tables or 'app_cache' not in tables:
             return
         already = conn.execute(text(
@@ -382,12 +397,16 @@ def _migrate_llm_cache():
         if already:
             return
         rows = conn.execute(text('SELECT desc, matched, provider FROM llm_cache')).fetchall()
+        
+        insert_sql = 'INSERT OR IGNORE INTO app_cache ' if DB_URL.startswith("sqlite") else 'INSERT INTO app_cache '
+        on_conflict = '' if DB_URL.startswith("sqlite") else ' ON CONFLICT (namespace, key_hash) DO NOTHING'
+        
         for desc, matched, provider in rows:
             h = hashlib.sha256((desc or '').encode('utf-8')).hexdigest()
             conn.execute(text(
-                'INSERT OR IGNORE INTO app_cache '
+                insert_sql +
                 '(namespace, key_hash, key_preview, value_json, meta, hits, created_at) '
-                "VALUES ('llm_match', :h, :p, :v, :m, 0, CURRENT_TIMESTAMP)"),
+                f"VALUES ('llm_match', :h, :p, :v, :m, 0, CURRENT_TIMESTAMP){on_conflict}"),
                 {'h': h, 'p': (desc or '')[:200],
                  'v': json_dumps(matched or ''), 'm': provider or ''})
         conn.commit()

@@ -16,6 +16,18 @@
   --border: #294962;
 }
 
+[data-theme='light'] {
+  --navy: #f4f7f9;
+  --panel: #ffffff;
+  --panel-light: #eef2f5;
+  --teal: #0384a1;
+  --accent: #3a7a8a;
+  --steel: #507b99;
+  --text: #1a2c3a;
+  --text-dim: #556c80;
+  --border: #d0dae3;
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -36,6 +48,8 @@ a { color: var(--teal); text-decoration: none; }
   border-right: 1px solid var(--border);
   padding: 16px 0;
   position: sticky; top: 0; height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 .sidebar .logo {
   padding: 8px 20px 20px;
@@ -45,6 +59,7 @@ a { color: var(--teal); text-decoration: none; }
 }
 .sidebar .logo img { display: block; width: 120px; margin-bottom: 10px; }
 .sidebar .logo span { color: var(--text-dim); font-weight: 400; font-size: 12px; display: block; letter-spacing: 0.5px; text-transform: none; font-family: 'Barlow', 'Segoe UI', sans-serif; }
+[data-theme='light'] .sidebar .logo img { filter: invert(0.8) hue-rotate(180deg); }
 .sidebar nav a {
   display: block; padding: 11px 20px; color: var(--text-dim);
   border-left: 3px solid transparent; font-weight: 500;
@@ -226,7 +241,14 @@ td.heat span { position: relative; z-index: 1; }
   margin: 12px 0 3px; padding: 0 14px; font-size: 10px; font-weight: 700;
   letter-spacing: 1.4px; text-transform: uppercase; color: var(--dim); opacity: 0.75;
 }
-.sidebar nav { overflow-y: auto; }
+.sidebar nav { 
+  overflow-y: auto; 
+  flex: 1;
+  scrollbar-width: none; /* Firefox */
+}
+.sidebar nav::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Edge */
+}
 
 /* ── lead stage badges ── */
 .stage-badge {

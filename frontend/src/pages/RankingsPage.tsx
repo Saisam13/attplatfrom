@@ -18,7 +18,7 @@ function loadCols(): Record<string, boolean> {
 }
 
 export default function RankingsPage() {
-  const { selectedRun } = useRuns()
+  const { selectedRun, runs, setSelectedId } = useRuns()
   const nav = useNavigate()
   const [params, setParams] = useSearchParams()
   const tab = (params.get('tab') as Tab) || 'all'
@@ -146,6 +146,16 @@ export default function RankingsPage() {
         </div>
         <button className="secondary" onClick={exportCsv}>Export view (CSV)</button>
         <span className="dim">{total} chemicals{loading ? ' · loading…' : ''}</span>
+        
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <label className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>Active run:</label>
+          <select value={selectedRun?.id ?? ''} onChange={e => setSelectedId(Number(e.target.value))} style={{ minWidth: 160 }}>
+            {runs.length === 0 && <option value="">— no runs yet —</option>}
+            {runs.map(r => (
+              <option key={r.id} value={r.id}>#{r.id} {r.name} ({r.status})</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="table-scroll" ref={scrollRef} style={{ maxHeight: '70vh' }}>

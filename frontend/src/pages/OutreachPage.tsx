@@ -65,64 +65,82 @@ function DraftTab() {
   }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 2fr) minmax(420px, 3fr)', gap: 18, alignItems: 'start' }}>
-      <div className="panel">
-        <div className="field">
-          <label>Lead</label>
-          <select value={leadId} onChange={e => { setLeadId(Number(e.target.value)); setResult(null) }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '24px', alignItems: 'flex-start' }}>
+      <div className="panel" style={{ flex: '1 1 360px', display: 'flex', flexDirection: 'column', gap: '16px', margin: 0 }}>
+        <h2 style={{ marginTop: 0, marginBottom: 4 }}>Pitch Configuration</h2>
+        
+        <div className="field" style={{ margin: 0 }}>
+          <label>Target Lead</label>
+          <select value={leadId} onChange={e => { setLeadId(Number(e.target.value)); setResult(null) }} style={{ width: '100%' }}>
             {leads.length === 0 && <option value={0}>— no leads yet —</option>}
             {leads.map(l => <option key={l.id} value={l.id}>{l.name} ({l.lead_type} · {l.stage})</option>)}
           </select>
         </div>
-        <div className="field">
-          <label>Channel</label>
-          <div className="tabs">
+        
+        <div className="field" style={{ margin: 0 }}>
+          <label>Outreach Channel</label>
+          <div className="tabs" style={{ display: 'flex', width: '100%' }}>
             {(['email', 'call', 'whatsapp'] as const).map(c => (
-              <button key={c} className={channel === c ? 'active' : ''} onClick={() => { setChannel(c); setResult(null) }}>
+              <button key={c} className={channel === c ? 'active' : ''} onClick={() => { setChannel(c); setResult(null) }} style={{ flex: 1, padding: '8px 4px', fontSize: 13 }}>
                 {c === 'email' ? '✉ Email' : c === 'call' ? '📞 Call script' : '💬 WhatsApp'}
               </button>
             ))}
           </div>
         </div>
-        <div className="field">
-          <label>Template / angle</label>
-          <select value={templateId} onChange={e => setTemplateId(Number(e.target.value))}>
+        
+        <div className="field" style={{ margin: 0 }}>
+          <label>Template / Angle</label>
+          <select value={templateId} onChange={e => setTemplateId(Number(e.target.value))} style={{ width: '100%' }}>
             <option value={0}>— freestyle (no template) —</option>
             {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
         </div>
-        <div className="field">
-          <label>Extra instructions (optional)</label>
+        
+        <div className="field" style={{ margin: 0 }}>
+          <label>Extra Instructions <span className="dim" style={{ textTransform: 'none', letterSpacing: 0 }}>(optional)</span></label>
           <textarea rows={3} value={extra} onChange={e => setExtra(e.target.value)}
+            style={{ width: '100%', resize: 'vertical' }}
             placeholder="e.g. mention our Hyderabad plant visit offer, keep it under 100 words…" />
         </div>
-        <button disabled={busy || !leadId} onClick={generate} style={{ width: '100%' }}>
-          {busy ? 'Generating…' : '⚡ Generate draft'}
+        
+        <button disabled={busy || !leadId} onClick={generate} style={{ width: '100%', padding: '12px', fontSize: 15, marginTop: 8 }}>
+          {busy ? 'Generating AI Draft…' : '⚡ Generate Draft'}
         </button>
+        
         {lead && Object.keys(lead.data || {}).length > 0 && (
-          <div className="dim" style={{ fontSize: 12, marginTop: 10 }}>
+          <div className="dim" style={{ fontSize: 12, textAlign: 'center' }}>
             Grounded in: linked {lead.lead_type} data{lead.entity_kind === 'epr_company' ? ' + EPR research (if run)' : ''} + recent notes.
           </div>
         )}
       </div>
 
-      <div className="panel">
-        <h2 style={{ marginTop: 0 }}>Draft {result?.provider && <span className="dim" style={{ fontSize: 12 }}>via {result.provider}</span>}</h2>
-        {!result && <div className="dim">Generate a draft to see it here. It is automatically logged on the lead's timeline.</div>}
+      <div className="panel" style={{ flex: '1 1 420px', margin: 0 }}>
+        <h2 style={{ marginTop: 0 }}>Generated Draft {result?.provider && <span className="dim" style={{ fontSize: 13, fontWeight: 'normal' }}>via {result.provider}</span>}</h2>
+        
+        {!result && (
+          <div className="dim" style={{ textAlign: 'center', padding: '60px 20px', border: '1px dashed var(--border)', borderRadius: 8, marginTop: 16 }}>
+            Generate a draft to see it here.<br/><br/>It is automatically logged on the lead's timeline for future reference.
+          </div>
+        )}
+        
         {result && (
           <>
-            <div className="draft-box">{result.draft}</div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-              <button onClick={() => { navigator.clipboard.writeText(result.draft); }}>📋 Copy</button>
+            <div className="draft-box" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5, background: 'var(--panel-light)', padding: 16, borderRadius: 8, border: '1px solid var(--border)', marginTop: 16 }}>
+              {result.draft}
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginTop: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button onClick={() => { navigator.clipboard.writeText(result.draft); toast('success', 'Copied to clipboard!') }}>📋 Copy to Clipboard</button>
               {result.wa_link && (
-                <a href={result.wa_link} target="_blank" rel="noreferrer">
-                  <button className="ghost">💬 Open in WhatsApp</button>
+                <a href={result.wa_link} target="_blank" rel="noreferrer" style={{ display: 'inline-block' }}>
+                  <button style={{ background: '#25D366', color: '#fff', border: 'none' }}>💬 Open in WhatsApp</button>
                 </a>
               )}
+              <div style={{ flex: 1, minWidth: 10 }} />
               <button className="ghost" onClick={async () => {
                 await api.logOutreach({ lead_id: leadId, channel, text: result.draft.slice(0, 200) })
                 setResult(null)
-              }}>✓ Mark as sent</button>
+                toast('success', 'Logged as sent on timeline')
+              }}>✓ Mark as Sent</button>
               <button className="ghost" disabled={busy} onClick={generate}>↻ Regenerate</button>
             </div>
           </>
