@@ -1,0 +1,9 @@
+{
+  "llm": {
+    "provider": "off",
+    "api_key": "",
+    "model": "",
+    "base_url": "http://localhost:11434"
+  },
+  "port": 8000
+}

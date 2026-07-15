@@ -1,0 +1,13 @@
+{
+  "name": "MiniMines Sales Hub",
+  "short_name": "Sales Hub",
+  "description": "Chemical trading attractiveness & battery feedstock procurement (internal)",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#001B2E",
+  "theme_color": "#001B2E",
+  "icons": [
+    { "src": "/att-icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/att-icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

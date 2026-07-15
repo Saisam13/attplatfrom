@@ -1,0 +1,17 @@
+# python
+venv/
+__pycache__/
+*.pyc
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+
+# local data (SQLite DB, uploaded files) — keep bundled assets:
+#   data/default_base_portfolio.xlsx, data/hsn_harmonized_system.csv
+data/att.db
+data/uploads/
+
+# misc
+*.log
+.DS_Store
