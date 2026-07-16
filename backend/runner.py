@@ -323,9 +323,10 @@ def _persist_battery(run_id, res):
             session.query(model).filter(model.run_id == run_id).delete()
         session.commit()
 
+        buf_entities = []
         for role, items in (('supplier', res['suppliers']), ('buyer', res['buyers'])):
             for it in items:
-                session.add(BatteryEntity(
+                buf_entities.append(dict(
                     run_id=run_id, role=role, name=it['name'], country=it['country'],
                     categories=it['categories'], shipments=it['shipments'],
                     qty_kg=it['qty_kg'], value_usd=it['value_usd'],
@@ -336,20 +337,28 @@ def _persist_battery(run_id, res):
                     detail_json=json.dumps(it['detail']),
                     engine_version=ENGINE_VERSION,
                 ))
+        if buf_entities:
+            session.bulk_insert_mappings(BatteryEntity, buf_entities)
 
+        buf_cats = []
+        buf_trends = []
         for c in res['categories']:
-            session.add(BatteryCategory(
+            buf_cats.append(dict(
                 run_id=run_id, category=c['category'], shipments=c['shipments'],
                 qty_kg=c['qty_kg'], value_usd=c['value_usd'],
                 median_price=c['median_price'], n_suppliers=c['n_suppliers'],
                 n_buyers=c['n_buyers'], top_countries=json.dumps(c['top_countries']),
             ))
             for month, n in c['monthly_shipments'].items():
-                session.add(MonthlyTrend(
+                buf_trends.append(dict(
                     run_id=run_id, chemical=c['category'], month=month, shipments=n,
                     qty_kg=c['monthly_qty'].get(month, 0),
                     value_usd=c['monthly_value'].get(month, 0), excluded=0,
                 ))
+        if buf_cats:
+            session.bulk_insert_mappings(BatteryCategory, buf_cats)
+        if buf_trends:
+            session.bulk_insert_mappings(MonthlyTrend, buf_trends)
         session.commit()
 
         buf = []
