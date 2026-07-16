@@ -362,7 +362,8 @@ def _persist_battery(run_id, res):
         session.commit()
 
         buf = []
-        for rx in res['rows']:
+        total_rows = len(res['rows'])
+        for idx, rx in enumerate(res['rows']):
             buf.append(dict(
                 run_id=run_id, date=rx['date'], hsn6=rx['hsn6'],
                 desc_clean=rx['desc_clean'][:500], chemical=rx['category'],
@@ -378,6 +379,10 @@ def _persist_battery(run_id, res):
             if len(buf) >= 2000:
                 session.bulk_insert_mappings(RawRow, buf)
                 buf = []
+                # Smooth progress from 80% to 92% based on rows processed
+                if total_rows > 0:
+                    pct = 80 + int((idx / total_rows) * 12)
+                    _update_run(run_id, progress=pct)
         if buf:
             session.bulk_insert_mappings(RawRow, buf)
         session.commit()
