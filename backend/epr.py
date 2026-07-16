@@ -304,7 +304,11 @@ def _name_tokens(name):
 
 def trade_matches(session, company_name, limit=50):
     """Shipment rows in the most recent completed runs whose buyer or seller
-    contains the significant tokens of the company name."""
+    contains the significant tokens of the company name. Deduped by row_hash
+    (R7) — the same physical shipment can appear in more than one of the last
+    4 runs (overlapping monthly extracts, accidental re-uploads) and would
+    otherwise be double/triple/quadruple counted here and in the cross-links
+    summary."""
     tokens = _name_tokens(company_name)[:3]
     if not tokens:
         return []
@@ -316,13 +320,23 @@ def trade_matches(session, company_name, limit=50):
     q = session.query(RawRow).filter(RawRow.run_id.in_(run_ids))
     for t in tokens:
         q = q.filter((RawRow.buyer.ilike(f'%{t}%')) | (RawRow.seller.ilike(f'%{t}%')))
-    rows = q.limit(limit).all()
+    # over-fetch then dedupe — up to 4x the rows could be the same shipment
+    rows = q.order_by(RawRow.run_id.desc()).limit(limit * 4).all()
+    seen, deduped = set(), []
+    for r in rows:
+        key = r.row_hash or f'id:{r.id}'  # rows predating the row_hash backfill degrade to no-dedup
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+        if len(deduped) >= limit:
+            break
     return [{'run_id': r.run_id, 'date': r.date, 'hsn6': r.hsn6,
              'desc_clean': (r.desc_clean or '')[:160], 'chemical': r.chemical,
              'seller': r.seller, 'seller_country': r.seller_country,
              'buyer': r.buyer, 'buyer_country': r.buyer_country,
              'qty_kg': r.qty_kg, 'value_usd': r.value_usd,
-             'unit_price': r.unit_price} for r in rows]
+             'unit_price': r.unit_price} for r in deduped]
 
 
 @router.get('/companies/{company_id}/trade')

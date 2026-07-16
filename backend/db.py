@@ -21,9 +21,25 @@ if DB_URL.startswith("postgres://"):
 
 connect_args = {}
 if DB_URL.startswith("sqlite"):
-    connect_args = {'check_same_thread': False}
+    # busy_timeout: a writer (bulk RawRow insert during a run) waits instead
+    # of immediately raising "database is locked" when a reader collides with it.
+    connect_args = {'check_same_thread': False, 'timeout': 30}
 
 engine = create_engine(DB_URL, connect_args=connect_args)
+
+if DB_URL.startswith("sqlite"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine, 'connect')
+    def _sqlite_pragmas(dbapi_conn, _record):
+        # R10: WAL lets readers (dashboard requests) proceed concurrently with
+        # a writer (a background run bulk-inserting raw_rows) instead of
+        # blocking behind SQLite's default single-writer-exclusive journal.
+        cur = dbapi_conn.cursor()
+        cur.execute('PRAGMA journal_mode=WAL')
+        cur.execute('PRAGMA busy_timeout=30000')
+        cur.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 Base = declarative_base()
 
@@ -40,6 +56,7 @@ class Run(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     config_json = Column(Text, default='{}')   # trend_exclude, llm mode, files
     stats_json = Column(Text, default='{}')    # row counts, match stats, tiers
+    file_hashes = Column(Text, default='[]')   # sha256 of each uploaded source file (dup-upload warning)
 
 
 class ChemicalScore(Base):
@@ -79,6 +96,7 @@ class ChemicalScore(Base):
     growth_rate = Column(Float, default=0)
     reasoning = Column(Text, default='')
     detail_json = Column(Text, default='{}')   # price stats, top buyers/suppliers/countries
+    engine_version = Column(Integer, default=1)  # 1=percentile-rank (legacy), 2=anchor-band
 
     __table_args__ = (Index('ix_scores_run_chem', 'run_id', 'chemical'),)
 
@@ -141,6 +159,7 @@ class RawRow(Base):
     value_usd = Column(Float)
     unit_price = Column(Float)
     file = Column(String)
+    row_hash = Column(String, index=True, default='')  # dedupe the same shipment across runs
 
 
 class Feedback(Base):
@@ -187,6 +206,7 @@ class BatteryEntity(Base):
     proc_score = Column(Float, default=0)        # 0-100 procurement attractiveness
     tier = Column(String, default='C')
     detail_json = Column(Text, default='{}')     # per-category stats, counterparties, monthly
+    engine_version = Column(Integer, default=1)  # 1=percentile-rank (legacy), 2=anchor-band
 
     __table_args__ = (Index('ix_battery_run_role', 'run_id', 'role'),)
 
@@ -328,10 +348,13 @@ class PitchTemplate(Base):
 
 
 class ApiKey(Base):
-    """Static keys for the external read-only API (/api/v1/*)."""
+    """Static keys for the external read-only API (/api/v1/*). `key` stores a
+    SHA256 hash, never the raw key — the raw key is shown exactly once at
+    creation time (see leads.create_key) and cannot be retrieved afterward."""
     __tablename__ = 'api_keys'
     id = Column(Integer, primary_key=True)
-    key = Column(String, unique=True, index=True, nullable=False)
+    key = Column(String, unique=True, index=True, nullable=False)  # sha256 hash
+    key_preview = Column(String, default='')  # first ~12 chars of the raw key, display only
     label = Column(String, default='')
     scopes = Column(String, default='read')
     created_by = Column(String, default='')
@@ -361,8 +384,13 @@ def _migrate():
     """Additive column migrations for databases created before these columns existed."""
     from sqlalchemy import text
     added = {
-        'runs': [('kind', "VARCHAR DEFAULT 'chemical'")],
-        'chemical_scores': [('feedback_adj', 'FLOAT DEFAULT 0')],
+        'runs': [('kind', "VARCHAR DEFAULT 'chemical'"),
+                 ('file_hashes', "TEXT DEFAULT '[]'")],
+        'chemical_scores': [('feedback_adj', 'FLOAT DEFAULT 0'),
+                            ('engine_version', 'INTEGER DEFAULT 1')],
+        'battery_entities': [('engine_version', 'INTEGER DEFAULT 1')],
+        'raw_rows': [('row_hash', 'VARCHAR DEFAULT \'\'')],
+        'api_keys': [('key_preview', 'VARCHAR DEFAULT \'\'')],
     }
     with engine.connect() as conn:
         for table, cols in added.items():
@@ -414,6 +442,33 @@ def _migrate_llm_cache():
             print(f'[migrate] copied {len(rows)} llm_cache rows into app_cache')
 
 
+def _migrate_api_keys():
+    """One-time hash-at-rest migration (R10): rows created before hashing was
+    added still have the raw key sitting in the `key` column (key_preview
+    empty is the tell) — hash it in place and save a display-only preview
+    before any code starts comparing against hashes."""
+    import hashlib
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        if DB_URL.startswith("sqlite"):
+            tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+        else:
+            tables = {r[0] for r in conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))}
+        if 'api_keys' not in tables:
+            return
+        rows = conn.execute(text(
+            "SELECT id, key FROM api_keys WHERE key_preview IS NULL OR key_preview = ''")).fetchall()
+        if not rows:
+            return
+        for kid, raw_key in rows:
+            preview = (raw_key or '')[:12] + '…'
+            hashed = hashlib.sha256((raw_key or '').encode('utf-8')).hexdigest()
+            conn.execute(text('UPDATE api_keys SET "key" = :h, key_preview = :p WHERE id = :id'),
+                        {'h': hashed, 'p': preview, 'id': kid})
+        conn.commit()
+        print(f'[migrate] hashed {len(rows)} existing api_keys at rest')
+
+
 def json_dumps(v):
     import json
     return json.dumps(v)
@@ -423,3 +478,4 @@ def init_db():
     Base.metadata.create_all(engine)
     _migrate()
     _migrate_llm_cache()
+    _migrate_api_keys()

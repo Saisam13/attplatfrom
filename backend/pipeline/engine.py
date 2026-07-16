@@ -8,6 +8,7 @@ inputs when the LLM assist is off (default).
 """
 from . import patches  # noqa: F401  (openpyxl aRGB monkey-patch — must be first)
 
+import math
 import os
 import re
 from collections import Counter, defaultdict
@@ -20,8 +21,22 @@ import openpyxl
 from .constants import (
     WEIGHTS, NLP_DIRECT_THRESHOLD, NLP_NEAR_THRESHOLD, TIER_A_MIN, TIER_B_MIN,
     OUTLIER_IQR_MULT, WINSORIZE_LO, WINSORIZE_HI, GEO_EVENTS, REGULATORY,
-    NOISE_RE, UNIT_TO_KG, SYNONYMS, SPELLING, EASE,
+    NOISE_RE, UNIT_TO_KG, SYNONYMS, SPELLING, EASE, ATT_ANCHOR_BANDS,
 )
+
+
+def _log_anchor_score(value, floor, ceiling):
+    """Absolute, cohort-independent 0-100 score: floor -> 0, ceiling -> 100,
+    log-linear between, clamped outside. Deterministic function of `value`
+    alone (no sort, no rank, no dependence on other rows), so identical raw
+    values always score identically and the score never moves when other
+    chemicals/entities are added, removed, or corrected."""
+    value = max(0.0, value)
+    lo, hi = math.log1p(max(0.0, floor)), math.log1p(max(0.0, ceiling))
+    if hi <= lo:
+        return 100.0 if value >= ceiling else 0.0
+    v = math.log1p(value)
+    return max(0.0, min(100.0, (v - lo) / (hi - lo) * 100))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -269,12 +284,95 @@ def _match_score(desc, name_lower, name_tokens):
 
 
 def _extract_chem_name(desc):
+    """First-pass per-row candidate name. On its own this still fragments the
+    same substance across minor phrasing differences and lets machine-
+    translated tariff boilerplate through as a "chemical" — _cluster_opportunity_names
+    (called once per HSN6 group in stage3_aggregate) fixes both (R8)."""
     d = re.sub(r'\b(?:TOTAL|CONTAINING|MATERIAL|PRODUCT|CHEMICAL|COMPOUND|SOLUTION|MIXTURE|GRADE|PURE|REAGENT|TECHNICAL|INDUSTRIAL|POWDER|LIQUID|SOLID|CRYSTAL|GRANULAR|ANHYDROUS|HYDRATE|HEXAHYDRATE|MONOHYDRATE)\b', '', desc, flags=re.I)
     d = re.sub(r'\b\d+\.?\d*\s*%?\b', '', d)
     d = re.sub(r'\s+', ' ', d).strip()
     words = d.split()[:6]
     name = ' '.join(words)
     return name.title() if name else 'Unknown'
+
+
+# Tariff/translation boilerplate that shows up as a "chemical" once run
+# through the 6-word extractor above (e.g. "Los demas" -> "The Demas", a
+# generic Spanish HS-heading phrase meaning "the rest/others") plus the
+# generic connector words already stripped from base-chemical name tokens.
+_OPP_STOPWORDS = {
+    'the', 'of', 'and', 'or', 'for', 'in', 'not', 'other', 'others', 'else',
+    'demas', 'nes', 'nec', 'heading', 'elsewhere', 'specified', 'included',
+    'etc', 'item', 'declaracion', 'pkgs',
+}
+
+
+def _opp_tokens(name):
+    """Significant tokens for clustering, with a trailing-'s' strip so plural
+    variants of the same word ('alum'/'alums', 'chloride'/'chlorides') don't
+    read as unrelated tokens — the single biggest cause of near-duplicate
+    opportunity names in real EXIM descriptions."""
+    tokens = re.findall(r'[a-z0-9]+', (name or '').lower())
+    # stopword-filter BEFORE stemming — stemming "demas" -> "dema" would
+    # otherwise dodge the stopword check entirely, since "dema" itself isn't listed
+    tokens = [t for t in tokens if t not in _OPP_STOPWORDS and len(t) > 2]
+    stemmed = (t[:-1] if len(t) > 4 and t.endswith('s') else t for t in tokens)
+    return frozenset(stemmed)
+
+
+def _cluster_opportunity_names(rows):
+    """R8: group unmatched rows by HSN6 + normalized token overlap instead of
+    trusting the raw per-row 6-word extraction verbatim, so phrasing variants
+    of the same substance ("Sulphates; Alum; Peroxosulphates (Persulphates)"
+    vs "Sulphates; Alums;Peroxosulphates") collapse into one opportunity
+    chemical instead of three, and machine-translated tariff boilerplate
+    ("The Demas. The Demas. Nitrites; Nitrates.") reduces to an empty token
+    set and is bucketed under 'Unknown' rather than presented as a chemical.
+    Mutates row['chemical_id'] in place (rows are shared with exim_rows, so
+    RawRow persistence sees the clustered name too)."""
+    from collections import defaultdict, Counter
+    by_hsn = defaultdict(lambda: defaultdict(int))
+    for r in rows:
+        by_hsn[r['hsn6']][r['chemical_id']] += 1
+
+    remap = {}
+    for hsn6, name_counts in by_hsn.items():
+        clusters = []  # [{'tokens': frozenset, 'names': Counter}]
+        for raw_name, cnt in sorted(name_counts.items(), key=lambda kv: -kv[1]):
+            sig = _opp_tokens(raw_name)
+            if not sig:
+                remap[(hsn6, raw_name)] = 'Unknown'
+                continue
+            match = None
+            for cl in clusters:
+                overlap = cl['tokens'] & sig
+                # overlap coefficient (overlap / smaller set), not Jaccard —
+                # a short, clean name ('Sulphates') should still cluster with
+                # a longer noisy one ('The Demas. Sulphates; Alums; ...')
+                # that shares its core token, even though the longer one's
+                # extra qualifier words would tank a union-based ratio.
+                smaller = min(len(cl['tokens']), len(sig))
+                if smaller and len(overlap) / smaller >= 0.5:
+                    match = cl
+                    break
+            if match is None:
+                match = {'tokens': sig, 'names': Counter()}
+                clusters.append(match)
+            match['tokens'] = match['tokens'] | sig
+            match['names'][raw_name] += cnt
+        for cl in clusters:
+            # prefer a variant that isn't itself boilerplate-prefixed as the
+            # display name, even if a boilerplate-prefixed phrasing happens to
+            # be the single most common literal string in the cluster
+            clean = [n for n, _ in cl['names'].most_common()
+                    if not re.match(r'^(the|los|of|de)\s+demas\b', n, re.I) and 'demas' not in n.lower()]
+            canonical = clean[0] if clean else cl['names'].most_common(1)[0][0]
+            for raw_name in cl['names']:
+                remap[(hsn6, raw_name)] = canonical
+
+    for r in rows:
+        r['chemical_id'] = remap.get((r['hsn6'], r['chemical_id']), r['chemical_id'])
+    return rows
 
 
 def stage2_nlp_match(exim_rows, base_chemicals, hsn_to_base, log=print, llm_matcher=None):
@@ -406,6 +504,7 @@ def stage3_aggregate(exim_rows, base_chemicals, log=print):
     base_names = {bc['name'].lower() for bc in base_chemicals}
     matched_rows = [r for r in exim_rows if r['match_type'] in ('direct', 'near', 'llm')]
     unmatched_rows = [r for r in exim_rows if r['match_type'] == 'none']
+    unmatched_rows = _cluster_opportunity_names(unmatched_rows)
 
     base_chemicals_agg = _aggregate_rows(matched_rows, base_names)
     opp_chemicals_raw = _aggregate_rows(unmatched_rows, base_names)
@@ -430,7 +529,10 @@ def _score_price(c):
     return median(prices) * c['total_qty_kg']
 
 
-def _score_buyers(c):
+def _buyers_components(c):
+    """Raw sub-values behind the buyers dimension. n_buyers/n_countries are
+    open-ended counts (need a log-anchor transform before combining); frag and
+    repeat_pct are already 0-1 by construction."""
     n_buyers = len(c['buyers'])
     n_countries = len(c['buyer_countries'])
     total = c['shipment_count']
@@ -440,18 +542,47 @@ def _score_buyers(c):
         frag = 1 - hhi
     else:
         frag = 0
-    return 0.3 * n_buyers + 0.3 * frag * 100 + 0.2 * n_countries * 5 + 0.2 * repeat_pct * 100
+    return {'n_buyers': n_buyers, 'n_countries': n_countries,
+            'frag': frag, 'repeat_pct': repeat_pct}
 
 
-def _score_suppliers(c):
+def _suppliers_components(c):
     n_sellers = len(c['sellers'])
     n_countries = len(c['seller_countries'])
     india_pct = c['seller_countries'].get('INDIA', 0) / max(c['shipment_count'], 1)
-    return 0.4 * n_sellers + 0.3 * india_pct * 100 + 0.3 * n_countries * 5
+    return {'n_sellers': n_sellers, 'n_countries': n_countries, 'india_pct': india_pct}
 
 
-def _score_trend(c):
-    months = sorted(m for m in c['monthly_qty'].keys() if c['monthly_qty'][m] > 0)
+def _score_buyers(c, bands):
+    b = _buyers_components(c)
+    score = (0.3 * _log_anchor_score(b['n_buyers'], **bands['buyers_n']) +
+             0.3 * b['frag'] * 100 +
+             0.2 * _log_anchor_score(b['n_countries'], **bands['buyers_countries']) +
+             0.2 * b['repeat_pct'] * 100)
+    return max(0.0, min(100.0, score))
+
+
+def _score_suppliers(c, bands):
+    s = _suppliers_components(c)
+    score = (0.4 * _log_anchor_score(s['n_sellers'], **bands['suppliers_n']) +
+             0.3 * s['india_pct'] * 100 +
+             0.3 * _log_anchor_score(s['n_countries'], **bands['buyers_countries']))
+    return max(0.0, min(100.0, score))
+
+
+def _effective_trend_exclude(trend_exclude):
+    """Admin-configured exclusions plus the current (likely still-loading)
+    calendar month, which would otherwise read as a volume crash in the
+    regression — the exact trap a partial upload creates."""
+    exclude = set(trend_exclude or [])
+    exclude.add(datetime.now().strftime('%Y-%m'))
+    return exclude
+
+
+def _score_trend(c, trend_exclude=None):
+    exclude = _effective_trend_exclude(trend_exclude)
+    months = sorted(m for m in c['monthly_qty'].keys()
+                     if c['monthly_qty'][m] > 0 and m not in exclude)
     if len(months) < 3:
         return 50
     months = months[-12:]
@@ -528,29 +659,51 @@ def _classify_variance(c):
     return 'neutral'
 
 
-def stage4_analyse(chemicals, log=print):
-    log("\nSTAGE 4 — Running 8 individual analyses...")
-    chem_names = list(chemicals.keys())
-    n = len(chem_names)
-    if n == 0:
-        return {}
+def stage4_analyse(chemicals, log=print, anchor_bands=None, trend_exclude=None):
+    """v2 engine — absolute, cohort-independent scoring (replaces percentile
+    ranking). Two families of dimension:
+
+    - barrier, freedom, structure, trend are already 0-100 scores by
+      construction (see their _score_* functions) — used directly as *_norm,
+      no ranking step. This is also what fixes the tie-lottery for them:
+      identical raw inputs now produce identical (not randomly spread) scores.
+    - volume, price, buyers, suppliers are open-ended raw magnitudes/counts —
+      each unbounded sub-term runs through `_log_anchor_score` (admin-editable
+      floor/ceiling) before being combined, so the result is bounded 0-100 and
+      does not depend on any other chemical in the run.
+
+    See docs/PLATFORM_REDESIGN_PLAN.md §2 for the full rationale."""
+    log("\nSTAGE 4 — Running 8 individual analyses (anchor-band engine v2)...")
+    bands = anchor_bands or ATT_ANCHOR_BANDS
     scores = {}
-    for cid in chem_names:
-        c = chemicals[cid]
+    for cid, c in chemicals.items():
+        volume_raw = _score_volume(c)
+        price_raw = _score_price(c)
+        buyers_norm = _score_buyers(c, bands)
+        suppliers_norm = _score_suppliers(c, bands)
+        trend_raw = _score_trend(c, trend_exclude)
+        structure_raw = _score_structure(c)
+        freedom_raw = _score_freedom(c)
+        barrier_raw = _score_barrier(c)
+        vt = _classify_variance(c)
+
         scores[cid] = {
-            'volume': _score_volume(c), 'price': _score_price(c),
-            'buyers': _score_buyers(c), 'suppliers': _score_suppliers(c),
-            'trend': _score_trend(c), 'structure': _score_structure(c),
-            'freedom': _score_freedom(c), 'barrier': _score_barrier(c),
-            'variance_type': _classify_variance(c), 'variance_mod': 0,
+            'volume': volume_raw, 'price': price_raw,
+            'buyers': round(buyers_norm, 2), 'suppliers': round(suppliers_norm, 2),
+            'trend': trend_raw, 'structure': structure_raw,
+            'freedom': freedom_raw, 'barrier': barrier_raw,
+            'variance_type': vt,
+            'variance_mod': 5 if vt == 'opportunity' else (-10 if vt == 'risk' else 0),
+            'volume_norm': _log_anchor_score(volume_raw, **bands['volume']),
+            'price_norm': _log_anchor_score(price_raw, **bands['price']),
+            'buyers_norm': buyers_norm,
+            'suppliers_norm': suppliers_norm,
+            'trend_norm': trend_raw,
+            'structure_norm': structure_raw,
+            'freedom_norm': freedom_raw,
+            'barrier_norm': barrier_raw,
         }
-        vt = scores[cid]['variance_type']
-        scores[cid]['variance_mod'] = 5 if vt == 'opportunity' else (-10 if vt == 'risk' else 0)
-    for dim in ['volume', 'price', 'buyers', 'suppliers', 'trend', 'structure', 'freedom', 'barrier']:
-        raw_vals = sorted([(cid, scores[cid][dim]) for cid in chem_names], key=lambda x: x[1])
-        for rank, (cid, _) in enumerate(raw_vals):
-            scores[cid][dim + '_norm'] = (rank / max(n - 1, 1)) * 100
-    log(f"  Scored {n} chemicals across 8 dimensions")
+    log(f"  Scored {len(scores)} chemicals across 8 dimensions (engine v2)")
     return scores
 
 
@@ -570,24 +723,39 @@ def _match_geo_event(month, cid, c):
 
 
 def stage4b_geo_adjust(chemicals, scores, log=print):
-    log("\nSTAGE 4b — Geopolitical adjustment...")
+    """v2: robust anomaly detection. A z-score on raw monthly volume using
+    mean/stdev cannot exceed (n-1)/sqrt(n) — only 1.79 at n=5 — so the old
+    |z|>2.0 threshold was mathematically incapable of firing below 6 active
+    months, while a single huge month distorted the mean/stdev used to judge
+    every other month. Fix: log1p the monthly values (so one huge month
+    doesn't dominate the scale), use median/MAD (robust to outliers) instead
+    of mean/stdev, and require a genuine 6-month history before attempting
+    detection at all."""
+    log("\nSTAGE 4b — Geopolitical adjustment (robust median/MAD, v2)...")
     geo_log = []
     for cid, c in chemicals.items():
         months = sorted(m for m in c['monthly_qty'].keys() if c['monthly_qty'][m] > 0)
-        if len(months) < 4:
+        if len(months) < 6:
             continue
         vals = [c['monthly_qty'][m] for m in months]
         avg = mean(vals)
         if avg == 0:
             continue
-        sd = stdev(vals) if len(vals) > 1 else 0
-        if sd == 0:
+
+        log_vals = [math.log1p(v) for v in vals]
+        med_log = median(log_vals)
+        mad = median([abs(lv - med_log) for lv in log_vals])
+        if mad == 0:
             continue
+        # 1.4826 makes MAD comparable to a normal-distribution std-dev;
+        # 0.6745 is the standard robust modified-z-score scale (Iglewicz &
+        # Hoaglin), paired with the conventional |z|>3.5 outlier threshold.
+        scale = mad * 1.4826
 
         anomalies = []
-        for m, v in zip(months, vals):
-            z = (v - avg) / sd
-            if abs(z) > 2.0:
+        for m, v, lv in zip(months, vals, log_vals):
+            z = 0.6745 * (lv - med_log) / scale
+            if abs(z) > 3.5:
                 direction = 'spike' if z > 0 else 'drop'
                 event_match = _match_geo_event(m, cid, c)
                 anomalies.append({
@@ -616,7 +784,8 @@ def stage4b_geo_adjust(chemicals, scores, log=print):
 
             if cid in scores:
                 scores[cid]['geo_adj'] = adj_factor
-                scores[cid]['trend_adjusted'] = scores[cid].get('trend_norm', 50) * adj_factor
+                scores[cid]['trend_adjusted'] = max(0, min(
+                    100, scores[cid].get('trend_norm', 50) * adj_factor))
         else:
             if cid in scores:
                 scores[cid]['geo_adj'] = 1.0
@@ -704,9 +873,13 @@ def stage6_score(chemicals, scores, log=print, weights=None, tier_a=None, tier_b
 # ══════════════════════════════════════════════════════════════
 def compute_trend_direction(c, trend_exclude):
     """Port of the Time Trends sheet growth logic. trend_exclude is a set of
-    'YYYY-MM' months excluded from the growth calculation (still displayed)."""
+    'YYYY-MM' months excluded from the growth calculation (still displayed).
+    Matches the same effective exclusion set used by the actual trend score
+    (_score_trend) so the "Growing/Declining" label never disagrees with what
+    was scored."""
+    exclude = _effective_trend_exclude(trend_exclude)
     months = sorted(m for m in c['monthly_shipments'] if c['monthly_shipments'][m] > 0)
-    trend_vals = [c['monthly_shipments'][m] for m in months if m not in trend_exclude]
+    trend_vals = [c['monthly_shipments'][m] for m in months if m not in exclude]
     if len(trend_vals) >= 6:
         recent = mean(trend_vals[-6:])
         prior_slice = trend_vals[-12:-6] if len(trend_vals) > 6 else trend_vals[:-6]
@@ -786,7 +959,8 @@ def opportunity_reasoning(c, s):
 
 
 def run_pipeline(exim_files, base_file, log=print, progress=None, llm_matcher=None,
-                 weights=None, tier_a=None, tier_b=None):
+                 weights=None, tier_a=None, tier_b=None, trend_exclude=None,
+                 anchor_bands=None):
     """Run stages 1-6. Returns a dict with all intermediate + final artifacts.
     progress(stage_name, pct) is called between stages."""
     def _p(stage, pct):
@@ -801,13 +975,15 @@ def run_pipeline(exim_files, base_file, log=print, progress=None, llm_matcher=No
     base_chems, opp_chems = stage3_aggregate(exim_rows, base_chemicals, log)
 
     _p('Scoring base chemicals', 55)
-    base_scores = stage4_analyse(base_chems, log)
+    base_scores = stage4_analyse(base_chems, log, anchor_bands=anchor_bands,
+                                 trend_exclude=trend_exclude)
     base_scores, geo_log_base = stage4b_geo_adjust(base_chems, base_scores, log)
     base_scores, reg_log_base = stage5_regulatory(base_chems, base_scores, log)
     base_scores = stage6_score(base_chems, base_scores, log, weights, tier_a, tier_b)
 
     _p('Scoring opportunity chemicals', 70)
-    opp_scores = stage4_analyse(opp_chems, log)
+    opp_scores = stage4_analyse(opp_chems, log, anchor_bands=anchor_bands,
+                                trend_exclude=trend_exclude)
     opp_scores, geo_log_opp = stage4b_geo_adjust(opp_chems, opp_scores, log)
     opp_scores, reg_log_opp = stage5_regulatory(opp_chems, opp_scores, log)
     opp_scores = stage6_score(opp_chems, opp_scores, log, weights, tier_a, tier_b)

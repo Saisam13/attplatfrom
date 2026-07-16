@@ -420,6 +420,17 @@ function GeneralPanel({ s, save }: any) {
   const [retention, setRetention] = useState<number>(s.retention_days ?? 0)
   const [trendExclude, setTrendExclude] = useState((s.trend_exclude_default || []).join(', '))
 
+  const saveRetention = () => {
+    if (retention > 0) {
+      const ok = window.confirm(
+        `This will PERMANENTLY delete every run older than ${retention} day(s) — including its ` +
+        `chemical/battery scores, raw shipment rows, and geo/regulatory logs — on a recurring ` +
+        `background check. This cannot be undone. Continue?`)
+      if (!ok) return
+    }
+    save({ retention_days: retention })
+  }
+
   return (
     <div className="panel">
       <h2 style={{ marginTop: 0 }}>General</h2>
@@ -432,7 +443,7 @@ function GeneralPanel({ s, save }: any) {
             <input type="number" min={0} value={retention} style={{ width: 110 }}
               onChange={e => setRetention(Number(e.target.value))} />
             <button className="secondary" disabled={retention === s.retention_days}
-              onClick={() => save({ retention_days: retention })}>Save</button>
+              onClick={saveRetention}>Save</button>
           </div>
         </div>
         <div>

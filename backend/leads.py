@@ -3,6 +3,7 @@ leads, tagged by user/type/stage, with a timestamped event timeline that links
 snapshots of the data the lead came from. Everything is also exposed through
 the read-only external API (/api/v1/leads, X-API-Key protected).
 """
+import hashlib
 import json
 import secrets
 from datetime import datetime, date
@@ -254,13 +255,18 @@ class KeyIn(BaseModel):
     user_name: str = ''
 
 
+def _hash_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode('utf-8')).hexdigest()
+
+
 @keys_router.get('')
 def list_keys():
     session = SessionLocal()
     try:
         rows = session.query(ApiKey).order_by(ApiKey.id.desc()).all()
         return [{'id': k.id, 'label': k.label,
-                 'key_preview': k.key[:8] + '…', 'scopes': k.scopes,
+                 'key_preview': k.key_preview or '(created before hashing was added)',
+                 'scopes': k.scopes,
                  'created_by': k.created_by, 'revoked': bool(k.revoked),
                  'created_at': k.created_at.isoformat() if k.created_at else '',
                  'last_used_at': k.last_used_at.isoformat() if k.last_used_at else ''}
@@ -273,12 +279,13 @@ def list_keys():
 def create_key(body: KeyIn):
     session = SessionLocal()
     try:
-        key = 'mmk_' + secrets.token_urlsafe(32)
-        session.add(ApiKey(key=key, label=body.label.strip(),
-                           created_by=body.user_name.strip()))
+        raw_key = 'mmk_' + secrets.token_urlsafe(32)
+        session.add(ApiKey(key=_hash_key(raw_key), key_preview=raw_key[:12] + '…',
+                           label=body.label.strip(), created_by=body.user_name.strip()))
         session.commit()
-        # full key is returned exactly once
-        return {'key': key, 'label': body.label}
+        # full key is returned exactly once and is NOT retrievable afterward —
+        # only its hash is stored (R10)
+        return {'key': raw_key, 'label': body.label}
     finally:
         session.close()
 
@@ -299,12 +306,14 @@ def revoke_key(key_id: int):
 
 # ── external read-only API v1 ─────────────────────────────────────────────
 def require_api_key(request: Request):
-    supplied = request.headers.get('x-api-key', '') or request.query_params.get('api_key', '')
+    """R10: header only — a query-string ?api_key= lands in proxy/access logs,
+    browser history, and Referer headers, so it's no longer accepted."""
+    supplied = request.headers.get('x-api-key', '')
     if not supplied:
         raise HTTPException(401, 'X-API-Key header required')
     session = SessionLocal()
     try:
-        k = session.query(ApiKey).filter(ApiKey.key == supplied, ApiKey.revoked == 0).first()
+        k = session.query(ApiKey).filter(ApiKey.key == _hash_key(supplied), ApiKey.revoked == 0).first()
         if not k:
             raise HTTPException(403, 'Invalid or revoked API key')
         k.last_used_at = datetime.utcnow()

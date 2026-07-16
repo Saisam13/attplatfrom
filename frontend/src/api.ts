@@ -51,10 +51,15 @@ export interface FeedbackItem {
   comment: string; created_at: string
 }
 
+export interface DuplicateWarning {
+  message: string
+  runs: { run_id: number; run_name: string; created_at: string; overlap_count: number }[]
+}
+
 export interface BatteryEntity {
   name: string; country: string; categories: string
   shipments: number; qty_kg: number; value_usd: number
-  median_price: number; price_index: number
+  median_price: number; price_index: number | null
   months_active: number; first_month: string; last_month: string
   consistency: number; geo_ease: number; proc_score: number; tier: 'A' | 'B' | 'C'
   detail: {
@@ -130,9 +135,9 @@ export const api = {
   listRuns: (kind = '') => f(`/api/runs${kind ? `?kind=${kind}` : ''}`).then(r => j<Run[]>(r)),
   getRun: (id: number) => f(`/api/runs/${id}`).then(r => j<Run>(r)),
   createRun: (form: FormData) =>
-    f('/api/runs', { method: 'POST', body: form }).then(r => j<{ run_id: number }>(r)),
+    f('/api/runs', { method: 'POST', body: form }).then(r => j<{ run_id: number; duplicate_warning: DuplicateWarning | null }>(r)),
   createBatteryRun: (form: FormData) =>
-    f('/api/battery-runs', { method: 'POST', body: form }).then(r => j<{ run_id: number }>(r)),
+    f('/api/battery-runs', { method: 'POST', body: form }).then(r => j<{ run_id: number; duplicate_warning: DuplicateWarning | null }>(r)),
   renameRun: (id: number, name: string) =>
     f(`/api/runs/${id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },

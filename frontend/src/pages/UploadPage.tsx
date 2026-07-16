@@ -39,7 +39,11 @@ export default function UploadPage() {
       form.append('use_llm', String(useLlm))
       eximFiles.forEach(f => form.append('exim_files', f))
       if (baseFile) form.append('base_file', baseFile)
-      const { run_id } = await api.createRun(form)
+      const { run_id, duplicate_warning } = await api.createRun(form)
+      if (duplicate_warning) {
+        toast('error', duplicate_warning.message + ' (' +
+          duplicate_warning.runs.map(r => `#${r.run_id} ${r.run_name}`).join(', ') + ')')
+      }
       setEximFiles([])
       setBaseFile(null)
       setName('')

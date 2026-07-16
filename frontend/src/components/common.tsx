@@ -6,7 +6,10 @@ export function TierBadge({ tier }: { tier: string }) {
 }
 
 export function PoolBadge({ pool }: { pool: string }) {
-  return <span className={`pool-badge ${pool}`}>{pool}</span>
+  const label = pool === 'opportunity' ? 'opportunity (unverified, NLP-extracted)' : pool
+  return <span className={`pool-badge ${pool}`} title={pool === 'opportunity'
+    ? 'Grouped by NLP-extracted name from unmatched EXIM descriptions, not a curated portfolio chemical — verify before treating as a firm opportunity.'
+    : ''}>{label}</span>
 }
 
 export const STAGE_LABELS: Record<string, string> = {

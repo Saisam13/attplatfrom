@@ -18,6 +18,26 @@ WINSORIZE_HI = 95
 DEFAULT_TREND_EXCLUDE = ['2026-04', '2026-05', '2026-06']
 
 # ══════════════════════════════════════════════════════════════
+# ANCHOR BANDS — v2 scoring engine (log-anchor transform)
+# floor -> score 0, ceiling -> score 100, log-linear between, clamped outside.
+# Seeded from real percentiles in the live data — see
+# docs/PLATFORM_REDESIGN_PLAN.md §2.3. Admin-editable via Settings
+# (att_anchor_bands / battery_anchor_bands), these are just the fallback.
+# ══════════════════════════════════════════════════════════════
+ATT_ANCHOR_BANDS = {
+    'volume': {'floor': 10, 'ceiling': 50000000},
+    'price': {'floor': 1000, 'ceiling': 250000000},
+    'buyers_n': {'floor': 0, 'ceiling': 580},
+    'buyers_countries': {'floor': 0, 'ceiling': 76},
+    'suppliers_n': {'floor': 0, 'ceiling': 430},
+}
+BATTERY_ANCHOR_BANDS = {
+    'volume': {'floor': 1, 'ceiling': 50000},
+    'reliability': {'floor': 0, 'ceiling': 50},
+}
+ENGINE_VERSION = 2
+
+# ══════════════════════════════════════════════════════════════
 # GEOPOLITICAL EVENTS DATABASE
 # ══════════════════════════════════════════════════════════════
 GEO_EVENTS = [
