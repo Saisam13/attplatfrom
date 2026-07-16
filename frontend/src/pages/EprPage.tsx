@@ -18,6 +18,7 @@ export default function EprPage() {
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const nav = useNavigate()
+  const [material, setMaterial] = useState('lithium')
 
   const load = () => {
     api.eprCompanies({ search, sort, order, limit: '500' })
@@ -32,6 +33,7 @@ export default function EprPage() {
     const form = new FormData()
     form.append('file', file)
     form.append('mode', mode)
+    form.append('material', material)
     form.append('user_name', userName)
     try {
       const res = await api.eprUpload(form)
@@ -72,6 +74,12 @@ export default function EprPage() {
 
       <div className="panel" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         <strong>Upload targets file:</strong>
+        <select value={material} onChange={e => setMaterial(e.target.value)} disabled={uploading} style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)' }}>
+          <option value="lithium">Lithium</option>
+          <option value="cobalt">Cobalt</option>
+          <option value="nickel">Nickel</option>
+          <option value="manganese">Manganese</option>
+        </select>
         <input ref={fileRef} type="file" accept=".xlsx" disabled={uploading}
           onChange={e => { const f = e.target.files?.[0]; if (f) upload(f, 'merge') }} />
         <button className="ghost" disabled={uploading} title="Wipe the table and load only this file"
