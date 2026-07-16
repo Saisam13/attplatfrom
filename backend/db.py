@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     create_engine, Column, Integer, Float, String, Text, DateTime, Index,
+    UniqueConstraint, ForeignKey,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
@@ -243,16 +244,58 @@ class AppCache(Base):
     __table_args__ = (Index('ix_cache_ns_key', 'namespace', 'key_hash', unique=True),)
 
 
+class EprMaterial(Base):
+    """Active EPR-regulated battery material (Lithium, Cobalt, Nickel, Manganese).
+    Extensible: admin can add new materials. overall_weight is the material's
+    contribution to the final company grade (auto-normalized at scoring time)."""
+    __tablename__ = 'epr_materials'
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)     # 'Lithium'
+    slug = Column(String, unique=True, nullable=False)     # 'lithium'
+    overall_weight = Column(Float, default=1.0)            # admin-set; normalized per company
+    active = Column(Integer, default=1)                    # soft-disable without deleting data
+    display_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class EprCompanyMaterial(Base):
+    """Per-material target/credits data for one EPR company.
+    NULL = absent (no data for this material); 0.0 = reported zero.
+    This distinction is critical: a company with NULL lithium is excluded from
+    the lithium scoring pool; a company with 0.0 is included and scores bottom."""
+    __tablename__ = 'epr_company_materials'
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey('epr_companies.id', ondelete='CASCADE'),
+                        index=True, nullable=False)
+    material_id = Column(Integer, ForeignKey('epr_materials.id', ondelete='CASCADE'),
+                         index=True, nullable=False)
+    target_tons = Column(Float, nullable=True)      # NULL = no data (Q3)
+    credits = Column(Float, nullable=True)
+    import_qty = Column(Float, nullable=True)
+    parse_status = Column(String, default='ok')     # ok | zero | exempt | unparsed
+    source_file = Column(String, default='')
+    uploaded_by = Column(String, default='')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint('company_id', 'material_id',
+                                       name='uq_company_material'),)
+
+
 class EprCompany(Base):
-    """Producer row from a CPCB 'EPR Targets' upload (lithium battery producers)."""
+    """Producer row from a CPCB 'EPR Targets' upload (lithium battery producers).
+    identity fields only — per-material data lives in EprCompanyMaterial.
+    Legacy flat target_tons/credits stay in place for backward compatibility
+    but grade + grade_breakdown_json are the canonical scores (v2 engine)."""
     __tablename__ = 'epr_companies'
     id = Column(Integer, primary_key=True)
     company_name = Column(String, nullable=False, index=True)
-    registration_number = Column(String, default='')
+    registration_number = Column(String, default='', index=True)  # Q7: primary merge key
     address = Column(String, default='')
     email = Column(String, default='')
     state = Column(String, default='')
     battery_chemistry = Column(String, default='')
+    # Legacy flat fields (kept for backward compat; engine v2 uses epr_company_materials)
     target_tons = Column(Float, default=0)
     credits = Column(Float, default=0)
     import_qty = Column(Float, default=0)
@@ -261,6 +304,11 @@ class EprCompany(Base):
     uploaded_by = Column(String, default='')
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Q8/Q9: materialized grade columns
+    grade = Column(Float, default=0.0)            # 0-100; replaces priority_score
+    grade_label = Column(String, default='None')  # Top|High|Medium|Low|None
+    scores_version = Column(Integer, default=0)   # 0=unscored, 2=engine_v2
+    grade_breakdown_json = Column(Text, default='{}')
 
 
 class EprResearch(Base):
@@ -391,6 +439,14 @@ def _migrate():
         'battery_entities': [('engine_version', 'INTEGER DEFAULT 1')],
         'raw_rows': [('row_hash', 'VARCHAR DEFAULT \'\'')],
         'api_keys': [('key_preview', 'VARCHAR DEFAULT \'\'')],
+        # Q8/Q9: materialized grade columns on epr_companies
+        'epr_companies': [
+            ('grade', 'FLOAT DEFAULT 0.0'),
+            ('grade_label', "VARCHAR DEFAULT 'None'"),
+            ('scores_version', 'INTEGER DEFAULT 0'),
+            ('grade_breakdown_json', "TEXT DEFAULT '{}'"),
+            ('registration_number', "VARCHAR DEFAULT ''"),
+        ],
     }
     with engine.connect() as conn:
         for table, cols in added.items():
@@ -398,13 +454,62 @@ def _migrate():
                 existing = {r[1] for r in conn.execute(text(f'PRAGMA table_info({table})'))}
             else:
                 existing = {r[0] for r in conn.execute(text(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'"))}
-                
             if not existing:
-                continue  # table doesn't exist yet; create_all will make it current
+                continue
             for col, ddl in cols:
                 if col not in existing:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {ddl}'))
         conn.commit()
+
+
+def _seed_epr_materials():
+    """Q6: Seed the 4 default EPR materials if the table is empty.
+    Backfill legacy epr_companies rows (battery_chemistry='') into Lithium."""
+    from sqlalchemy import text
+    DEFAULT_MATERIALS = [
+        {'name': 'Lithium',   'slug': 'lithium',   'overall_weight': 1.0, 'display_order': 1},
+        {'name': 'Cobalt',    'slug': 'cobalt',    'overall_weight': 1.0, 'display_order': 2},
+        {'name': 'Nickel',    'slug': 'nickel',    'overall_weight': 1.0, 'display_order': 3},
+        {'name': 'Manganese', 'slug': 'manganese', 'overall_weight': 1.0, 'display_order': 4},
+    ]
+    session = SessionLocal()
+    try:
+        existing_count = session.query(EprMaterial).count()
+        if existing_count == 0:
+            for m in DEFAULT_MATERIALS:
+                session.add(EprMaterial(**m))
+            session.commit()
+            print('[migrate] seeded 4 default EPR materials')
+
+        # Q6: backfill legacy flat rows into epr_company_materials as Lithium
+        lithium = session.query(EprMaterial).filter(EprMaterial.slug == 'lithium').first()
+        if not lithium:
+            return
+        existing_mat_ids = {r.company_id for r in
+                           session.query(EprCompanyMaterial.company_id)
+                           .filter(EprCompanyMaterial.material_id == lithium.id).all()}
+        legacy = session.query(EprCompany).filter(
+            EprCompany.id.notin_(existing_mat_ids),
+            (EprCompany.target_tons > 0) | (EprCompany.credits > 0)
+        ).all()
+        count = 0
+        for c in legacy:
+            session.add(EprCompanyMaterial(
+                company_id=c.id,
+                material_id=lithium.id,
+                target_tons=c.target_tons if (c.target_tons or 0) > 0 else None,
+                credits=c.credits if (c.credits or 0) > 0 else None,
+                import_qty=c.import_qty if (c.import_qty or 0) > 0 else None,
+                parse_status='migrated',
+                source_file=c.source_file,
+                uploaded_by='migration',
+            ))
+            count += 1
+        if count:
+            session.commit()
+            print(f'[migrate] backfilled {count} legacy EPR rows into epr_company_materials (Lithium)')
+    finally:
+        session.close()
 
 
 def _migrate_llm_cache():
@@ -479,3 +584,4 @@ def init_db():
     _migrate()
     _migrate_llm_cache()
     _migrate_api_keys()
+    _seed_epr_materials()

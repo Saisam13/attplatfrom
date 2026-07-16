@@ -56,6 +56,12 @@ DEFAULTS = {
     # floor -> score 0, ceiling -> score 100 (clamped), log-linear between.
     'att_anchor_bands': {k: dict(v) for k, v in ATT_ANCHOR_BANDS.items()},
     'battery_anchor_bands': {k: dict(v) for k, v in BATTERY_ANCHOR_BANDS.items()},
+    # Q10: EPR log1p anchor bands (admin-editable). floor -> grade 0, ceiling -> grade 100.
+    # Seeded from real CPCB lithium data (p75=~100t, p95=~6300t, max=82481t).
+    'epr_anchor_bands': {
+        'target': {'floor': 0.1, 'ceiling': 10000.0},
+        'credits': {'floor': 0.1, 'ceiling': 10000.0},
+    },
 }
 
 def hash_pin(pin: str) -> str:
@@ -146,20 +152,28 @@ def _mask_for_log(key, value):
 def update(changes: dict, user_name: str = ''):
     """Apply {key: new_value} changes; every real change is logged (who/old/new)."""
     current = get_all()
+    epr_affected = False
     session = SessionLocal()
     try:
         for key, new_val in changes.items():
             if key not in DEFAULTS:
                 continue
-            # public_view() masks pin_code to a bool, so the frontend never
-            # echoes back a hash — anything arriving here is a genuinely new
-            # raw PIN the admin just typed, safe to always hash on write.
             if key == 'pin_code' and isinstance(new_val, str) and new_val:
                 new_val = hash_pin(new_val)
-            # allow partial dict updates (e.g. llm without re-sending api_key)
             if isinstance(DEFAULTS[key], dict) and isinstance(new_val, dict):
                 merged = {**current.get(key, {}), **new_val}
                 new_val = merged
+            # Q10: normalize epr_weights target+credit to sum 1 (prevents max grade > 100)
+            if key == 'epr_weights' and isinstance(new_val, dict):
+                wT = max(0.0, float(new_val.get('target_tons', 1.0)))
+                wC = max(0.0, float(new_val.get('credits', 0.5)))
+                total = wT + wC
+                if total > 0:
+                    new_val = {'target_tons': round(wT / total, 6),
+                               'credits': round(wC / total, 6)}
+                epr_affected = True
+            if key == 'epr_anchor_bands':
+                epr_affected = True
             if current.get(key) == new_val:
                 continue
             session.add(SettingsLog(
@@ -174,6 +188,13 @@ def update(changes: dict, user_name: str = ''):
                 session.add(row)
             row.value_json = json.dumps(new_val)
         session.commit()
+        # Q8/Q10: trigger EPR grade recompute if EPR-relevant settings changed
+        if epr_affected:
+            try:
+                from . import epr
+                epr._trigger_recompute(session)
+            except Exception as exc:
+                print(f'[settings] EPR recompute warning: {exc}')
     finally:
         session.close()
 
