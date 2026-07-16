@@ -102,7 +102,11 @@ function BatteryUpload({ onStarted }: { onStarted: () => void }) {
       const form = new FormData()
       form.append('name', name || `Battery run ${new Date().toLocaleString()}`)
       files.forEach(f => form.append('exim_files', f))
-      const { run_id } = await api.createBatteryRun(form)
+      const { run_id, duplicate_warning } = await api.createBatteryRun(form)
+      if (duplicate_warning) {
+        toast('error', duplicate_warning.message + ' (' +
+          duplicate_warning.runs.map(r => `#${r.run_id} ${r.run_name}`).join(', ') + ')')
+      }
       setFiles([]); setName('')
       onStarted()
       setSelectedBatteryId(run_id)
@@ -209,8 +213,8 @@ function EntityTable({ runId, role }: { runId: number; role: 'supplier' | 'buyer
                 <td className="mono">{fmt.num(e.qty_kg)}</td>
                 <td className="mono">{fmt.usd(e.value_usd)}</td>
                 <td className="mono">{e.median_price ? '$' + e.median_price : '—'}</td>
-                <td className="mono" style={{ color: e.price_index < 1 ? 'var(--green)' : e.price_index > 1.1 ? 'var(--orange)' : undefined }}>
-                  {e.price_index?.toFixed(2)}
+                <td className="mono" style={{ color: e.price_index == null ? undefined : e.price_index < 1 ? 'var(--green)' : e.price_index > 1.1 ? 'var(--orange)' : undefined }}>
+                  {e.price_index == null ? <span className="dim" title="Fewer than 3 priced shipments in a comparable category">—</span> : e.price_index.toFixed(2)}
                 </td>
                 <td className="mono">{Math.round((e.consistency || 0) * 100)}%</td>
                 <td className="mono">{e.months_active}</td>

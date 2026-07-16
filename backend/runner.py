@@ -2,6 +2,7 @@
 streams progress into the runs table, persists all results to SQLite,
 and writes the export workbook to disk. Handles both run kinds:
 'chemical' (ATT scoring) and 'battery' (feedstock procurement)."""
+import hashlib
 import json
 import os
 import shutil
@@ -17,11 +18,21 @@ from .db import (
 from . import settings
 from .llm import LlmMatcher
 from .pipeline import engine as pipe
+from .pipeline.constants import ENGINE_VERSION
 from .pipeline.export import stage7_output
 from .pipeline.battery import run_battery_pipeline
 from .pipeline.battery_export import write_battery_workbook
 
 _lock = threading.Lock()
+
+
+def _row_hash(date, hsn6, seller, buyer, qty_kg, value_usd):
+    """Identifies the same physical shipment across separate run uploads
+    (overlapping monthly extracts, accidental re-uploads) so cross-run
+    aggregation (EPR trade cross-links, future dashboards) can dedupe instead
+    of multiplying counts (R7)."""
+    key = f'{date}|{hsn6}|{seller}|{buyer}|{round(qty_kg, 1)}|{round(value_usd, 1)}'
+    return hashlib.sha256(key.encode('utf-8')).hexdigest()
 
 
 def run_dir(run_id):
@@ -69,7 +80,9 @@ def _execute(run_id, exim_files, base_file, config, llm_config):
         res = pipe.run_pipeline(exim_files, base_file, log=log, progress=progress,
                                 llm_matcher=llm_matcher,
                                 weights=st.get('weights'),
-                                tier_a=st.get('tier_a_min'), tier_b=st.get('tier_b_min'))
+                                tier_a=st.get('tier_a_min'), tier_b=st.get('tier_b_min'),
+                                trend_exclude=trend_exclude,
+                                anchor_bands=st.get('att_anchor_bands'))
 
         progress('Saving results to database', 80)
         _persist(run_id, res, trend_exclude)
@@ -108,22 +121,27 @@ TIER_TARGET = {'A': 85, 'B': 55, 'C': 20}
 
 def _feedback_adjustments(session):
     """Aggregate trader feedback across ALL past runs into a bounded per-chemical
-    adjustment: confirm +1, challenge -2, correct ±2.5 toward the suggested tier.
-    Clamped to ±5 so feedback nudges but never overrides the pipeline."""
+    adjustment. R9: 'confirm' means "this score looks right" and must not
+    itself change the score — only 'challenge' (-2) and 'correct' (±2.5 toward
+    the suggested tier) vote. Anonymous feedback (no user_name) is displayed
+    but excluded from scoring, since it can't be deduped by identity and
+    anonymous stacking was the actual abuse vector (three anonymous
+    'challenge' votes could otherwise move a score by half a tier width from
+    one unaccountable source). Clamped to ±5 so feedback nudges but never
+    overrides the pipeline."""
     by_chem = {}
-    for f in session.query(Feedback).all():
+    for f in session.query(Feedback).filter(Feedback.user_name != '').all():
         by_chem.setdefault(f.chemical, []).append(f)
 
     def adj_for(chemical, att_final):
         total = 0.0
         for f in by_chem.get(chemical, []):
-            if f.verdict == 'confirm':
-                total += 1.0
-            elif f.verdict == 'challenge':
+            if f.verdict == 'challenge':
                 total -= 2.0
             elif f.verdict == 'correct':
                 target = TIER_TARGET.get(f.suggested_tier, 55)
                 total += 2.5 if target > att_final else (-2.5 if target < att_final else 0)
+            # 'confirm' intentionally contributes 0 — see docstring
         return max(-5.0, min(5.0, total))
 
     return adj_for
@@ -203,6 +221,7 @@ def _persist(run_id, res, trend_exclude):
                     growth_rate=growth,
                     reasoning=pipe.opportunity_reasoning(c, s),
                     detail_json=json.dumps(detail),
+                    engine_version=ENGINE_VERSION,
                 ))
                 for month in sorted(c['monthly_shipments'].keys()):
                     session.add(MonthlyTrend(
@@ -237,6 +256,8 @@ def _persist(run_id, res, trend_exclude):
                 qty=rx['qty'], qty_kg=round(rx['qty_kg'], 1),
                 value_usd=round(rx['value_usd'], 1), unit_price=rx['unit_price'],
                 file=rx['file'],
+                row_hash=_row_hash(rx['date'], rx['hsn6'], rx['seller'], rx['buyer'],
+                                   rx['qty_kg'], rx['value_usd']),
             ))
             if len(buf) >= 2000:
                 session.bulk_insert_mappings(RawRow, buf)
@@ -269,7 +290,8 @@ def _execute_battery(run_id, exim_files, config):
         st = settings.get_all()
         res = run_battery_pipeline(exim_files, log=log, progress=progress,
                                    tier_a=st.get('tier_a_min', 70),
-                                   tier_b=st.get('tier_b_min', 40))
+                                   tier_b=st.get('tier_b_min', 40),
+                                   anchor_bands=st.get('battery_anchor_bands'))
 
         progress('Saving results to database', 80)
         _persist_battery(run_id, res)
@@ -312,6 +334,7 @@ def _persist_battery(run_id, res):
                     last_month=it['last_month'], consistency=it['consistency'],
                     geo_ease=it['geo_ease'], proc_score=it['proc_score'], tier=it['tier'],
                     detail_json=json.dumps(it['detail']),
+                    engine_version=ENGINE_VERSION,
                 ))
 
         for c in res['categories']:
@@ -340,6 +363,8 @@ def _persist_battery(run_id, res):
                 qty=rx['qty'], qty_kg=round(rx['qty_kg'], 1),
                 value_usd=round(rx['value_usd'], 1), unit_price=rx['unit_price'],
                 file=rx['file'],
+                row_hash=_row_hash(rx['date'], rx['hsn6'], rx['seller'], rx['buyer'],
+                                   rx['qty_kg'], rx['value_usd']),
             ))
             if len(buf) >= 2000:
                 session.bulk_insert_mappings(RawRow, buf)
@@ -355,11 +380,16 @@ def _persist_battery(run_id, res):
 # Run deletion (UI + retention auto-cleanup)
 # ══════════════════════════════════════════════════════════════
 def delete_run(run_id):
-    """Remove a run's DB rows and its uploads directory."""
+    """Remove a run's DB rows and its uploads directory. Feedback is
+    intentionally NOT deleted here (R9) — it's aggregated across ALL runs by
+    chemical name (_feedback_adjustments) and should keep influencing future
+    scores even after the run it was originally logged against is gone;
+    deleting it silently on retention cleanup was the actual bug (scores
+    shifting for no reason a user could see in any log)."""
     session = SessionLocal()
     try:
         for model in (ChemicalScore, MonthlyTrend, GeoLog, RegLog, RawRow,
-                      Feedback, BatteryEntity, BatteryCategory):
+                      BatteryEntity, BatteryCategory):
             session.query(model).filter(model.run_id == run_id).delete()
         run = session.get(Run, run_id)
         if run:

@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     create_engine, Column, Integer, Float, String, Text, DateTime, Index,
+    UniqueConstraint, ForeignKey,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
@@ -21,9 +22,25 @@ if DB_URL.startswith("postgres://"):
 
 connect_args = {}
 if DB_URL.startswith("sqlite"):
-    connect_args = {'check_same_thread': False}
+    # busy_timeout: a writer (bulk RawRow insert during a run) waits instead
+    # of immediately raising "database is locked" when a reader collides with it.
+    connect_args = {'check_same_thread': False, 'timeout': 30}
 
 engine = create_engine(DB_URL, connect_args=connect_args)
+
+if DB_URL.startswith("sqlite"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine, 'connect')
+    def _sqlite_pragmas(dbapi_conn, _record):
+        # R10: WAL lets readers (dashboard requests) proceed concurrently with
+        # a writer (a background run bulk-inserting raw_rows) instead of
+        # blocking behind SQLite's default single-writer-exclusive journal.
+        cur = dbapi_conn.cursor()
+        cur.execute('PRAGMA journal_mode=WAL')
+        cur.execute('PRAGMA busy_timeout=30000')
+        cur.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 Base = declarative_base()
 
@@ -40,6 +57,7 @@ class Run(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     config_json = Column(Text, default='{}')   # trend_exclude, llm mode, files
     stats_json = Column(Text, default='{}')    # row counts, match stats, tiers
+    file_hashes = Column(Text, default='[]')   # sha256 of each uploaded source file (dup-upload warning)
 
 
 class ChemicalScore(Base):
@@ -79,6 +97,7 @@ class ChemicalScore(Base):
     growth_rate = Column(Float, default=0)
     reasoning = Column(Text, default='')
     detail_json = Column(Text, default='{}')   # price stats, top buyers/suppliers/countries
+    engine_version = Column(Integer, default=1)  # 1=percentile-rank (legacy), 2=anchor-band
 
     __table_args__ = (Index('ix_scores_run_chem', 'run_id', 'chemical'),)
 
@@ -141,6 +160,7 @@ class RawRow(Base):
     value_usd = Column(Float)
     unit_price = Column(Float)
     file = Column(String)
+    row_hash = Column(String, index=True, default='')  # dedupe the same shipment across runs
 
 
 class Feedback(Base):
@@ -187,6 +207,7 @@ class BatteryEntity(Base):
     proc_score = Column(Float, default=0)        # 0-100 procurement attractiveness
     tier = Column(String, default='C')
     detail_json = Column(Text, default='{}')     # per-category stats, counterparties, monthly
+    engine_version = Column(Integer, default=1)  # 1=percentile-rank (legacy), 2=anchor-band
 
     __table_args__ = (Index('ix_battery_run_role', 'run_id', 'role'),)
 
@@ -223,16 +244,58 @@ class AppCache(Base):
     __table_args__ = (Index('ix_cache_ns_key', 'namespace', 'key_hash', unique=True),)
 
 
+class EprMaterial(Base):
+    """Active EPR-regulated battery material (Lithium, Cobalt, Nickel, Manganese).
+    Extensible: admin can add new materials. overall_weight is the material's
+    contribution to the final company grade (auto-normalized at scoring time)."""
+    __tablename__ = 'epr_materials'
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)     # 'Lithium'
+    slug = Column(String, unique=True, nullable=False)     # 'lithium'
+    overall_weight = Column(Float, default=1.0)            # admin-set; normalized per company
+    active = Column(Integer, default=1)                    # soft-disable without deleting data
+    display_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class EprCompanyMaterial(Base):
+    """Per-material target/credits data for one EPR company.
+    NULL = absent (no data for this material); 0.0 = reported zero.
+    This distinction is critical: a company with NULL lithium is excluded from
+    the lithium scoring pool; a company with 0.0 is included and scores bottom."""
+    __tablename__ = 'epr_company_materials'
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey('epr_companies.id', ondelete='CASCADE'),
+                        index=True, nullable=False)
+    material_id = Column(Integer, ForeignKey('epr_materials.id', ondelete='CASCADE'),
+                         index=True, nullable=False)
+    target_tons = Column(Float, nullable=True)      # NULL = no data (Q3)
+    credits = Column(Float, nullable=True)
+    import_qty = Column(Float, nullable=True)
+    parse_status = Column(String, default='ok')     # ok | zero | exempt | unparsed
+    source_file = Column(String, default='')
+    uploaded_by = Column(String, default='')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint('company_id', 'material_id',
+                                       name='uq_company_material'),)
+
+
 class EprCompany(Base):
-    """Producer row from a CPCB 'EPR Targets' upload (lithium battery producers)."""
+    """Producer row from a CPCB 'EPR Targets' upload (lithium battery producers).
+    identity fields only — per-material data lives in EprCompanyMaterial.
+    Legacy flat target_tons/credits stay in place for backward compatibility
+    but grade + grade_breakdown_json are the canonical scores (v2 engine)."""
     __tablename__ = 'epr_companies'
     id = Column(Integer, primary_key=True)
     company_name = Column(String, nullable=False, index=True)
-    registration_number = Column(String, default='')
+    registration_number = Column(String, default='', index=True)  # Q7: primary merge key
     address = Column(String, default='')
     email = Column(String, default='')
     state = Column(String, default='')
     battery_chemistry = Column(String, default='')
+    # Legacy flat fields (kept for backward compat; engine v2 uses epr_company_materials)
     target_tons = Column(Float, default=0)
     credits = Column(Float, default=0)
     import_qty = Column(Float, default=0)
@@ -241,6 +304,11 @@ class EprCompany(Base):
     uploaded_by = Column(String, default='')
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Q8/Q9: materialized grade columns
+    grade = Column(Float, default=0.0)            # 0-100; replaces priority_score
+    grade_label = Column(String, default='None')  # Top|High|Medium|Low|None
+    scores_version = Column(Integer, default=0)   # 0=unscored, 2=engine_v2
+    grade_breakdown_json = Column(Text, default='{}')
 
 
 class EprResearch(Base):
@@ -328,10 +396,13 @@ class PitchTemplate(Base):
 
 
 class ApiKey(Base):
-    """Static keys for the external read-only API (/api/v1/*)."""
+    """Static keys for the external read-only API (/api/v1/*). `key` stores a
+    SHA256 hash, never the raw key — the raw key is shown exactly once at
+    creation time (see leads.create_key) and cannot be retrieved afterward."""
     __tablename__ = 'api_keys'
     id = Column(Integer, primary_key=True)
-    key = Column(String, unique=True, index=True, nullable=False)
+    key = Column(String, unique=True, index=True, nullable=False)  # sha256 hash
+    key_preview = Column(String, default='')  # first ~12 chars of the raw key, display only
     label = Column(String, default='')
     scopes = Column(String, default='read')
     created_by = Column(String, default='')
@@ -361,8 +432,21 @@ def _migrate():
     """Additive column migrations for databases created before these columns existed."""
     from sqlalchemy import text
     added = {
-        'runs': [('kind', "VARCHAR DEFAULT 'chemical'")],
-        'chemical_scores': [('feedback_adj', 'FLOAT DEFAULT 0')],
+        'runs': [('kind', "VARCHAR DEFAULT 'chemical'"),
+                 ('file_hashes', "TEXT DEFAULT '[]'")],
+        'chemical_scores': [('feedback_adj', 'FLOAT DEFAULT 0'),
+                            ('engine_version', 'INTEGER DEFAULT 1')],
+        'battery_entities': [('engine_version', 'INTEGER DEFAULT 1')],
+        'raw_rows': [('row_hash', 'VARCHAR DEFAULT \'\'')],
+        'api_keys': [('key_preview', 'VARCHAR DEFAULT \'\'')],
+        # Q8/Q9: materialized grade columns on epr_companies
+        'epr_companies': [
+            ('grade', 'FLOAT DEFAULT 0.0'),
+            ('grade_label', "VARCHAR DEFAULT 'None'"),
+            ('scores_version', 'INTEGER DEFAULT 0'),
+            ('grade_breakdown_json', "TEXT DEFAULT '{}'"),
+            ('registration_number', "VARCHAR DEFAULT ''"),
+        ],
     }
     with engine.connect() as conn:
         for table, cols in added.items():
@@ -370,13 +454,62 @@ def _migrate():
                 existing = {r[1] for r in conn.execute(text(f'PRAGMA table_info({table})'))}
             else:
                 existing = {r[0] for r in conn.execute(text(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'"))}
-                
             if not existing:
-                continue  # table doesn't exist yet; create_all will make it current
+                continue
             for col, ddl in cols:
                 if col not in existing:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {ddl}'))
         conn.commit()
+
+
+def _seed_epr_materials():
+    """Q6: Seed the 4 default EPR materials if the table is empty.
+    Backfill legacy epr_companies rows (battery_chemistry='') into Lithium."""
+    from sqlalchemy import text
+    DEFAULT_MATERIALS = [
+        {'name': 'Lithium',   'slug': 'lithium',   'overall_weight': 1.0, 'display_order': 1},
+        {'name': 'Cobalt',    'slug': 'cobalt',    'overall_weight': 1.0, 'display_order': 2},
+        {'name': 'Nickel',    'slug': 'nickel',    'overall_weight': 1.0, 'display_order': 3},
+        {'name': 'Manganese', 'slug': 'manganese', 'overall_weight': 1.0, 'display_order': 4},
+    ]
+    session = SessionLocal()
+    try:
+        existing_count = session.query(EprMaterial).count()
+        if existing_count == 0:
+            for m in DEFAULT_MATERIALS:
+                session.add(EprMaterial(**m))
+            session.commit()
+            print('[migrate] seeded 4 default EPR materials')
+
+        # Q6: backfill legacy flat rows into epr_company_materials as Lithium
+        lithium = session.query(EprMaterial).filter(EprMaterial.slug == 'lithium').first()
+        if not lithium:
+            return
+        existing_mat_ids = {r.company_id for r in
+                           session.query(EprCompanyMaterial.company_id)
+                           .filter(EprCompanyMaterial.material_id == lithium.id).all()}
+        legacy = session.query(EprCompany).filter(
+            EprCompany.id.notin_(existing_mat_ids),
+            (EprCompany.target_tons > 0) | (EprCompany.credits > 0)
+        ).all()
+        count = 0
+        for c in legacy:
+            session.add(EprCompanyMaterial(
+                company_id=c.id,
+                material_id=lithium.id,
+                target_tons=c.target_tons if (c.target_tons or 0) > 0 else None,
+                credits=c.credits if (c.credits or 0) > 0 else None,
+                import_qty=c.import_qty if (c.import_qty or 0) > 0 else None,
+                parse_status='migrated',
+                source_file=c.source_file,
+                uploaded_by='migration',
+            ))
+            count += 1
+        if count:
+            session.commit()
+            print(f'[migrate] backfilled {count} legacy EPR rows into epr_company_materials (Lithium)')
+    finally:
+        session.close()
 
 
 def _migrate_llm_cache():
@@ -414,6 +547,33 @@ def _migrate_llm_cache():
             print(f'[migrate] copied {len(rows)} llm_cache rows into app_cache')
 
 
+def _migrate_api_keys():
+    """One-time hash-at-rest migration (R10): rows created before hashing was
+    added still have the raw key sitting in the `key` column (key_preview
+    empty is the tell) — hash it in place and save a display-only preview
+    before any code starts comparing against hashes."""
+    import hashlib
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        if DB_URL.startswith("sqlite"):
+            tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+        else:
+            tables = {r[0] for r in conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))}
+        if 'api_keys' not in tables:
+            return
+        rows = conn.execute(text(
+            "SELECT id, key FROM api_keys WHERE key_preview IS NULL OR key_preview = ''")).fetchall()
+        if not rows:
+            return
+        for kid, raw_key in rows:
+            preview = (raw_key or '')[:12] + '…'
+            hashed = hashlib.sha256((raw_key or '').encode('utf-8')).hexdigest()
+            conn.execute(text('UPDATE api_keys SET "key" = :h, key_preview = :p WHERE id = :id'),
+                        {'h': hashed, 'p': preview, 'id': kid})
+        conn.commit()
+        print(f'[migrate] hashed {len(rows)} existing api_keys at rest')
+
+
 def json_dumps(v):
     import json
     return json.dumps(v)
@@ -423,3 +583,5 @@ def init_db():
     Base.metadata.create_all(engine)
     _migrate()
     _migrate_llm_cache()
+    _migrate_api_keys()
+    _seed_epr_materials()

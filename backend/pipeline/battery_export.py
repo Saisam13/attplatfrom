@@ -7,14 +7,17 @@ import openpyxl
 from .export import _hdr_row, _body_cell, _method_row, FILL_TIER_A, FILL_TIER_B, FILL_TIER_C
 
 BATTERY_METHODOLOGY = {
-    'Suppliers': 'METHODOLOGY: Procurement attractiveness per supplier = weighted percentile of '
-                 'Volume 30% + Price competitiveness 25% (median price vs category market median, cheaper is better) '
-                 '+ Consistency 20% (active months / span) + Reliability 15% (shipment count) + Geography 10% '
+    'Suppliers': 'METHODOLOGY: Procurement attractiveness per supplier = absolute score (not a leaderboard '
+                 'percentile — a score is stable even as other suppliers are added or removed) blending '
+                 'Volume 30% (log-anchored to shipment kg) + Price competitiveness 25% (median price vs category '
+                 'market median — needs >=3 priced shipments in a coherent category or is excluded, not assumed '
+                 '"market price") + Consistency 20% (active months / max(span, 6) — a single active month can no '
+                 'longer score a perfect 1.0) + Reliability 15% (log-anchored shipment count) + Geography 10% '
                  '(trade-ease of origin country). Tier A>=70, B=40-69, C<40. Price index <1.0 means the supplier '
-                 'sells below the market median for its categories.',
-    'Buyers': 'METHODOLOGY: Competing-buyer presence = weighted percentile of Volume 40% + Reliability 25% + '
-              'Consistency 20% + Geography 15%. These are the entities competing for the same feedstock — '
-              'high-tier buyers indicate contested material.',
+                 'sells below the market median for its categories; blank = insufficient price data.',
+    'Buyers': 'METHODOLOGY: Competing-buyer presence = absolute score blending Volume 40% + Reliability 25% + '
+              'Consistency 20% + Geography 15% (same log-anchor / floor methodology as Suppliers). These are the '
+              'entities competing for the same feedstock — high-tier buyers indicate contested material.',
     'Categories': 'METHODOLOGY: Feedstock categories classified from EXIM descriptions (keyword rules: black mass, '
                   'Li-ion/lead-acid/mixed battery scrap, electrode scrap, spent catalyst, NdFeB magnet scrap, '
                   'e-waste/PCB, residues/tailings) with HSN-prefix fallback (854810, 8549, 2620/2621, 8507).',

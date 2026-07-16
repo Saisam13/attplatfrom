@@ -30,7 +30,19 @@ DEFAULT_BASE = os.path.join(DATA_DIR, 'default_base_portfolio.xlsx')
 FRONTEND_DIST = os.path.join(ROOT, 'frontend', 'dist')
 
 app = FastAPI(title='MiniMines Sales Hub', version='3.0')
-app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
+# R10: allow_origins=['*'] let ANY web page an employee visits silently call
+# mutating endpoints (DELETE /api/runs/{id}, PUT /api/settings, ...) on this
+# host with zero cross-origin restriction — on the default no-PIN LAN
+# deployment that's drive-by data destruction from one malicious ad. The
+# frontend is served same-origin by this same app (see the SPA mount below),
+# so wildcard CORS was never needed for the real use case; only the dev-mode
+# Vite server (a different origin/port) needs an explicit allowance. For a
+# LAN deployment reached under another hostname/IP, set CORS_ALLOWED_ORIGINS
+# (comma-separated) in the environment.
+_cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', '')
+_cors_origins = ([o.strip() for o in _cors_env.split(',') if o.strip()] if _cors_env
+                 else ['http://localhost:5173', 'http://127.0.0.1:5173'])
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_methods=['*'], allow_headers=['*'])
 init_db()
 
 # ── module routers ────────────────────────────────────────────
@@ -52,6 +64,26 @@ outreach.seed_templates()   # default pitch templates on first boot
 # ══════════════════════════════════════════════════════════════
 # Optional shared-PIN gate (for internet-facing deployments)
 # ══════════════════════════════════════════════════════════════
+# R10: the PIN endpoint had no rate limit or lockout — a 4-6 digit PIN falls
+# to brute force in seconds without one. Simple in-memory sliding-window
+# limiter keyed by client IP; a single process is enough here since this gate
+# only matters for small internet-facing deployments, not a clustered one.
+_PIN_MAX_ATTEMPTS = 5
+_PIN_WINDOW_SECONDS = 300
+_pin_failures = {}
+
+
+def _pin_rate_limited(ip):
+    now = time.time()
+    attempts = [t for t in _pin_failures.get(ip, []) if now - t < _PIN_WINDOW_SECONDS]
+    _pin_failures[ip] = attempts
+    return len(attempts) >= _PIN_MAX_ATTEMPTS
+
+
+def _record_pin_failure(ip):
+    _pin_failures.setdefault(ip, []).append(time.time())
+
+
 @app.middleware('http')
 async def pin_gate(request: Request, call_next):
     # /api/v1/* is the external API — it carries its own X-API-Key auth
@@ -60,8 +92,12 @@ async def pin_gate(request: Request, call_next):
             and request.method != 'OPTIONS':
         s = settings.get_all()
         if s.get('pin_enabled') and s.get('pin_code'):
+            ip = request.client.host if request.client else 'unknown'
+            if _pin_rate_limited(ip):
+                return JSONResponse({'detail': 'too_many_attempts'}, status_code=429)
             supplied = request.headers.get('x-att-pin', '')
-            if supplied != str(s['pin_code']):
+            if not settings.verify_pin(supplied, s['pin_code']):
+                _record_pin_failure(ip)
                 return JSONResponse({'detail': 'pin_required'}, status_code=401)
     return await call_next(request)
 
@@ -71,11 +107,17 @@ class PinIn(BaseModel):
 
 
 @app.post('/api/auth/verify')
-def verify_pin(body: PinIn):
+def verify_pin(body: PinIn, request: Request):
     s = settings.get_all()
     if not s.get('pin_enabled') or not s.get('pin_code'):
         return {'ok': True, 'pin_required': False}
-    return {'ok': body.pin == str(s['pin_code']), 'pin_required': True}
+    ip = request.client.host if request.client else 'unknown'
+    if _pin_rate_limited(ip):
+        raise HTTPException(429, 'Too many attempts — try again later')
+    ok = settings.verify_pin(body.pin, s['pin_code'])
+    if not ok:
+        _record_pin_failure(ip)
+    return {'ok': ok, 'pin_required': True}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -114,14 +156,41 @@ threading.Thread(target=_cleanup_loop, daemon=True).start()
 # Runs (kind = chemical | battery)
 # ══════════════════════════════════════════════════════════════
 async def _save_uploads(run_id, exim_files):
+    import hashlib
     rdir = runner.run_dir(run_id)
-    paths = []
+    paths, hashes = [], []
     for f in exim_files:
+        content = await f.read()
         dest = os.path.join(rdir, os.path.basename(f.filename or 'exim.xlsx'))
         with open(dest, 'wb') as out:
-            out.write(await f.read())
+            out.write(content)
         paths.append(dest)
-    return paths
+        hashes.append(hashlib.sha256(content).hexdigest())
+    return paths, hashes
+
+
+def _check_duplicate_files(session, hashes, exclude_run_id):
+    """R7: warn (never block) when an uploaded file's content exactly matches
+    a file already used in a prior run — the user may still intend a
+    correction re-run, so this is informational only."""
+    hashes_set = set(hashes)
+    if not hashes_set:
+        return None
+    matches = []
+    for r in (session.query(Run).filter(Run.id != exclude_run_id,
+                                        Run.file_hashes.isnot(None),
+                                        Run.file_hashes != '[]').all()):
+        existing = set(json.loads(r.file_hashes or '[]'))
+        overlap = hashes_set & existing
+        if overlap:
+            matches.append({'run_id': r.id, 'run_name': r.name,
+                            'created_at': r.created_at.isoformat() if r.created_at else '',
+                            'overlap_count': len(overlap)})
+    if not matches:
+        return None
+    return {'message': f'{len(matches)} prior run(s) already contain at least one identical '
+                       f'source file — re-uploading may double-count those shipments.',
+            'runs': matches}
 
 
 @app.post('/api/runs')
@@ -146,7 +215,10 @@ async def create_run(
         session.commit()
         run_id = run.id
 
-        paths = await _save_uploads(run_id, exim_files)
+        paths, hashes = await _save_uploads(run_id, exim_files)
+        dup_warning = _check_duplicate_files(session, hashes, exclude_run_id=run_id)
+        run.file_hashes = json.dumps(hashes)
+        session.commit()
         if base_file is not None:
             base_path = os.path.join(runner.run_dir(run_id), 'base_portfolio.xlsx')
             with open(base_path, 'wb') as out:
@@ -156,7 +228,7 @@ async def create_run(
 
         llm_config = settings.get('llm', {})
         runner.start_run(run_id, paths, base_path, config, llm_config)
-        return {'run_id': run_id}
+        return {'run_id': run_id, 'duplicate_warning': dup_warning}
     finally:
         session.close()
 
@@ -174,9 +246,12 @@ async def create_battery_run(
         session.add(run)
         session.commit()
         run_id = run.id
-        paths = await _save_uploads(run_id, exim_files)
+        paths, hashes = await _save_uploads(run_id, exim_files)
+        dup_warning = _check_duplicate_files(session, hashes, exclude_run_id=run_id)
+        run.file_hashes = json.dumps(hashes)
+        session.commit()
         runner.start_battery_run(run_id, paths, config)
-        return {'run_id': run_id}
+        return {'run_id': run_id, 'duplicate_warning': dup_warning}
     finally:
         session.close()
 
@@ -562,8 +637,17 @@ def add_feedback(fb: FeedbackIn):
         raise HTTPException(400, 'verdict must be confirm | challenge | correct')
     session = SessionLocal()
     try:
+        user_name = fb.user_name.strip()
+        # R9: one active vote per (user, chemical) — a named user's new vote
+        # replaces their prior vote for this chemical instead of stacking
+        # indefinitely (previously the same person could submit "challenge"
+        # repeatedly and each one kept counting).
+        if user_name:
+            (session.query(Feedback)
+             .filter(Feedback.chemical == fb.chemical, Feedback.user_name == user_name)
+             .delete())
         row = Feedback(run_id=fb.run_id, chemical=fb.chemical, verdict=fb.verdict,
-                       user_name=fb.user_name.strip(), suggested_tier=fb.suggested_tier,
+                       user_name=user_name, suggested_tier=fb.suggested_tier,
                        expected_duration=fb.expected_duration, comment=fb.comment)
         session.add(row)
         session.commit()

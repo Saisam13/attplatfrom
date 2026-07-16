@@ -3,11 +3,16 @@
 Settings are seeded from pipeline constants / config.json on first read so the
 platform keeps producing identical numbers until someone edits them in the UI.
 """
+import hashlib
 import json
 import os
+import secrets
 
 from .db import SessionLocal, AppSetting, SettingsLog, ROOT
-from .pipeline.constants import WEIGHTS, TIER_A_MIN, TIER_B_MIN, DEFAULT_TREND_EXCLUDE
+from .pipeline.constants import (
+    WEIGHTS, TIER_A_MIN, TIER_B_MIN, DEFAULT_TREND_EXCLUDE,
+    ATT_ANCHOR_BANDS, BATTERY_ANCHOR_BANDS,
+)
 
 CONFIG_PATH = os.path.join(ROOT, 'config.json')
 
@@ -25,7 +30,9 @@ DEFAULTS = {
     'tier_a_min': TIER_A_MIN,
     'tier_b_min': TIER_B_MIN,
     'trend_exclude_default': list(DEFAULT_TREND_EXCLUDE),
-    'retention_days': 180,          # 0 = keep runs forever
+    'retention_days': 0,             # 0 = keep runs forever (R10: was 180 — auto-deleting
+                                      # a sales team's run history by default is the wrong
+                                      # default; require an explicit, confirmed opt-in instead)
     'feedback_adjustment': True,    # trader feedback nudges future ATT scores (±5)
     'show_feedback_page': True,
     'pin_enabled': False,
@@ -45,7 +52,40 @@ DEFAULTS = {
     },
     'epr_weights': {'target_tons': 1.0, 'credits': 0.5},
     'cache_ttl_days': {},           # per-namespace override, 0 = keep forever
+    # Anchor-band floor/ceiling for the v2 scoring engine's log-scale dimensions.
+    # floor -> score 0, ceiling -> score 100 (clamped), log-linear between.
+    'att_anchor_bands': {k: dict(v) for k, v in ATT_ANCHOR_BANDS.items()},
+    'battery_anchor_bands': {k: dict(v) for k, v in BATTERY_ANCHOR_BANDS.items()},
+    # Q10: EPR log1p anchor bands — derived from real CPCB lithium data
+    # 756 companies with nonzero targets: p75=0.2t, p90=1.8t, p95=7.8t, p99=101.9t, max=82,481t
+    # Ceiling at p99 (101.9t) so top producers differentiate; TMB (82,481t) will correctly score 100.
+    'epr_anchor_bands': {
+        'target':  {'floor': 0.01, 'ceiling': 101.9},
+        'credits': {'floor': 0.01, 'ceiling': 101.9},
+    },
 }
+
+def hash_pin(pin: str) -> str:
+    """R10: PIN stored as salt:sha256(salt+pin), never plaintext. A 4-6 digit
+    PIN's tiny keyspace means hashing alone can't stop brute force — rate
+    limiting (see main.py pin_gate) is the actual defense; this only protects
+    against a copied/leaked DB file directly revealing the PIN."""
+    salt = secrets.token_hex(8)
+    digest = hashlib.sha256((salt + pin).encode('utf-8')).hexdigest()
+    return f'{salt}:{digest}'
+
+
+def verify_pin(supplied: str, stored: str) -> bool:
+    if not stored:
+        return False
+    if ':' not in stored:
+        # legacy plaintext value saved before hashing was added — compare
+        # directly so an already-configured PIN doesn't suddenly lock everyone
+        # out; it gets hashed automatically the next time it's changed in Settings
+        return supplied == stored
+    salt, digest = stored.split(':', 1)
+    return hashlib.sha256((salt + supplied).encode('utf-8')).hexdigest() == digest
+
 
 SECRET_KEYS = {'pin_code'}          # returned masked
 MASKED_SUBKEYS = {
@@ -113,15 +153,28 @@ def _mask_for_log(key, value):
 def update(changes: dict, user_name: str = ''):
     """Apply {key: new_value} changes; every real change is logged (who/old/new)."""
     current = get_all()
+    epr_affected = False
     session = SessionLocal()
     try:
         for key, new_val in changes.items():
             if key not in DEFAULTS:
                 continue
-            # allow partial dict updates (e.g. llm without re-sending api_key)
+            if key == 'pin_code' and isinstance(new_val, str) and new_val:
+                new_val = hash_pin(new_val)
             if isinstance(DEFAULTS[key], dict) and isinstance(new_val, dict):
                 merged = {**current.get(key, {}), **new_val}
                 new_val = merged
+            # Q10: normalize epr_weights target+credit to sum 1 (prevents max grade > 100)
+            if key == 'epr_weights' and isinstance(new_val, dict):
+                wT = max(0.0, float(new_val.get('target_tons', 1.0)))
+                wC = max(0.0, float(new_val.get('credits', 0.5)))
+                total = wT + wC
+                if total > 0:
+                    new_val = {'target_tons': round(wT / total, 6),
+                               'credits': round(wC / total, 6)}
+                epr_affected = True
+            if key == 'epr_anchor_bands':
+                epr_affected = True
             if current.get(key) == new_val:
                 continue
             session.add(SettingsLog(
@@ -136,6 +189,13 @@ def update(changes: dict, user_name: str = ''):
                 session.add(row)
             row.value_json = json.dumps(new_val)
         session.commit()
+        # Q8/Q10: trigger EPR grade recompute if EPR-relevant settings changed
+        if epr_affected:
+            try:
+                from . import epr
+                epr._trigger_recompute(session)
+            except Exception as exc:
+                print(f'[settings] EPR recompute warning: {exc}')
     finally:
         session.close()
 
