@@ -53,18 +53,16 @@ def build_digest():
                         bucket].append({'id': l.id, 'name': l.name, 'lead_type': l.lead_type,
                                         'next_followup': l.next_followup, 'stage': l.stage})
 
-        # top EPR companies (weights inline to avoid import cycle)
-        from .epr import _epr_weights, _priority
-        w = _epr_weights()
-        companies = session.query(EprCompany).all()
-        researched = {r.company_id for r in session.query(EprResearch.company_id).all()}
-        top_epr = sorted(({'id': c.id, 'company_name': c.company_name,
-                           'priority_score': _priority(c, w),
-                           'target_tons': c.target_tons, 'credits': c.credits,
-                           'gap_tons': round(max(0, (c.target_tons or 0) - (c.credits or 0)), 1),
-                           'has_research': c.id in researched,
-                           'is_new': bool(c.created_at and c.created_at >= week_ago)}
-                          for c in companies), key=lambda d: -d['priority_score'])[:10]
+        # top EPR companies (using materialized grade from V2 engine)
+        companies = session.query(EprCompany).order_by(EprCompany.grade.desc()).limit(10).all()
+        researched = {r.company_id for r in session.query(EprResearch.company_id).filter(EprResearch.company_id.in_([c.id for c in companies])).all()} if companies else set()
+        top_epr = [{'id': c.id, 'company_name': c.company_name,
+                    'priority_score': c.grade,
+                    'target_tons': c.target_tons, 'credits': c.credits,
+                    'gap_tons': round(max(0, (c.target_tons or 0) - (c.credits or 0)), 1),
+                    'has_research': c.id in researched,
+                    'is_new': bool(c.created_at and c.created_at >= week_ago)}
+                   for c in companies]
 
         # ATT movers from the two latest completed chemical runs
         chem_runs = (session.query(Run)
