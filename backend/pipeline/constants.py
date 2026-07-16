@@ -25,15 +25,19 @@ DEFAULT_TREND_EXCLUDE = ['2026-04', '2026-05', '2026-06']
 # (att_anchor_bands / battery_anchor_bands), these are just the fallback.
 # ══════════════════════════════════════════════════════════════
 ATT_ANCHOR_BANDS = {
-    'volume': {'floor': 10, 'ceiling': 50000000},
-    'price': {'floor': 1000, 'ceiling': 250000000},
-    'buyers_n': {'floor': 0, 'ceiling': 580},
+    # Derived from real production data: 107,251 EXIM rows across all runs
+    # (n=985 chemicals scored). Anchors set at p95 for ceiling so the top
+    # 5% of chemicals still have room to differentiate (p99 would compress them).
+    'volume': {'floor': 10, 'ceiling': 1_306_605},       # p95=1.3M kg;  max=353M kg
+    'price':  {'floor': 1_000, 'ceiling': 11_836_965},   # p95=11.8M USD; max=763M USD
+    'buyers_n':         {'floor': 0, 'ceiling': 580},
     'buyers_countries': {'floor': 0, 'ceiling': 76},
-    'suppliers_n': {'floor': 0, 'ceiling': 430},
+    'suppliers_n':      {'floor': 0, 'ceiling': 430},
 }
 BATTERY_ANCHOR_BANDS = {
-    'volume': {'floor': 1, 'ceiling': 50000},
-    'reliability': {'floor': 0, 'ceiling': 50},
+    # Derived from real battery run data: 13,255 entities
+    'volume':      {'floor': 1, 'ceiling': 15_000},   # p95=15,000 kg; max=1.2B kg (extreme outlier)
+    'reliability': {'floor': 0, 'ceiling': 15},       # p95=15 shipments; max=609
 }
 ENGINE_VERSION = 2
 

@@ -56,11 +56,12 @@ DEFAULTS = {
     # floor -> score 0, ceiling -> score 100 (clamped), log-linear between.
     'att_anchor_bands': {k: dict(v) for k, v in ATT_ANCHOR_BANDS.items()},
     'battery_anchor_bands': {k: dict(v) for k, v in BATTERY_ANCHOR_BANDS.items()},
-    # Q10: EPR log1p anchor bands (admin-editable). floor -> grade 0, ceiling -> grade 100.
-    # Seeded from real CPCB lithium data (p75=~100t, p95=~6300t, max=82481t).
+    # Q10: EPR log1p anchor bands — derived from real CPCB lithium data
+    # 756 companies with nonzero targets: p75=0.2t, p90=1.8t, p95=7.8t, p99=101.9t, max=82,481t
+    # Ceiling at p99 (101.9t) so top producers differentiate; TMB (82,481t) will correctly score 100.
     'epr_anchor_bands': {
-        'target': {'floor': 0.1, 'ceiling': 10000.0},
-        'credits': {'floor': 0.1, 'ceiling': 10000.0},
+        'target':  {'floor': 0.01, 'ceiling': 101.9},
+        'credits': {'floor': 0.01, 'ceiling': 101.9},
     },
 }
 
