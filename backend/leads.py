@@ -89,8 +89,15 @@ def _push_to_twenty(lead_dict: dict, event: str = 'created'):
                     }
                 }
 
+            # Ensure we hit the root /graphql, even if TWENTY_API_URL ends in /api
+            base_url = TWENTY_API_URL
+            if base_url.endswith('/api'):
+                base_url = base_url[:-4]
+            elif base_url.endswith('/'):
+                base_url = base_url[:-1]
+
             resp = http_requests.post(
-                f'{TWENTY_API_URL}/graphql',
+                f'{base_url}/graphql',
                 headers=headers,
                 json={'query': mutation, 'variables': variables},
                 timeout=10,
