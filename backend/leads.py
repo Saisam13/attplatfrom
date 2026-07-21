@@ -512,10 +512,6 @@ async def receive_twenty_webhook(request: Request):
     twenty_status = record.get('status', 'NEW')
     twenty_source = record.get('source', '')
 
-    # Skip if the lead was originally pushed from SalesHub (prevent loop)
-    if twenty_source == 'SALESHUB':
-        return {'status': 'ignored', 'reason': 'originated from SalesHub'}
-
     sh_stage = TWENTY_TO_SH_STAGE.get(twenty_status, 'new')
 
     # Combine Lead Name + Company for SalesHub's `name` field
@@ -544,6 +540,22 @@ async def receive_twenty_webhook(request: Request):
             session.commit()
             return {'status': 'updated', 'id': existing.id}
         else:
+            # Check if this is an echo webhook from a lead we just created, 
+            # or a manual lead with the exact same name, to avoid duplicates.
+            dup = session.query(Lead).filter(Lead.name == combined_name).first()
+            if dup:
+                dup.entity_kind = 'twenty_crm'
+                dup.entity_ref = twenty_id
+                old_stage = dup.stage
+                dup.stage = sh_stage
+                dup.updated_at = datetime.utcnow()
+                if old_stage != sh_stage:
+                    _add_event(session, dup.id, 'stage_change',
+                               f'{old_stage} → {sh_stage} (synced from Twenty CRM)',
+                               user='__twenty_sync__')
+                session.commit()
+                return {'status': 'linked', 'id': dup.id}
+
             # CREATE
             l = Lead(
                 name=combined_name,
