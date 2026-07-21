@@ -242,6 +242,8 @@ export const api = {
     f(`/api/leads/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...body, user_name: user.get() }) }).then(r => j<Lead>(r)),
   deleteLead: (id: number) => f(`/api/leads/${id}`, { method: 'DELETE' }).then(r => j<any>(r)),
+  transferLeadToCrm: (id: number) =>
+    f(`/api/leads/${id}/transfer-to-crm`, { method: 'POST' }).then(r => j<{ ok: boolean; twenty_id: string }>(r)),
   addLeadEvent: (id: number, body: object) =>
     f(`/api/leads/${id}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...body, user_name: user.get() }) }).then(r => j<any>(r)),

@@ -17,6 +17,7 @@ export default function LeadsPage() {
   const [filters, setFilters] = useState({ lead_type: '', stage: '', owner: '', tag: '', search: '', due: '' })
   const [openLead, setOpenLead] = useState<Lead | null>(null)
   const [adding, setAdding] = useState(false)
+  const [transferring, setTransferring] = useState<Set<number>>(new Set())
 
   const load = () => {
     const params: Record<string, string> = { limit: '500' }
@@ -28,6 +29,21 @@ export default function LeadsPage() {
   useEffect(load, [filters])
 
   const set = (k: string, v: string) => setFilters(f => ({ ...f, [k]: v }))
+
+  const transferToCrm = async (lead: Lead) => {
+    if (!window.confirm(`Transfer "${lead.name}" to the Twenty CRM leads tab? It will be removed from SalesHub — all further work on it happens in Twenty.`)) return
+    setTransferring(prev => new Set(prev).add(lead.id))
+    try {
+      await api.transferLeadToCrm(lead.id)
+      toast('success', `"${lead.name}" transferred to Twenty CRM`)
+      if (openLead?.id === lead.id) setOpenLead(null)
+      load()
+    } catch (e: any) {
+      toast('error', String(e.message || e))
+    } finally {
+      setTransferring(prev => { const n = new Set(prev); n.delete(lead.id); return n })
+    }
+  }
 
   return (
     <div>
@@ -74,7 +90,7 @@ export default function LeadsPage() {
 
       <div className="table-scroll">
         <table>
-          <thead><tr><th>Lead</th><th>Type</th><th>Stage</th><th>Owner</th><th>Tags</th><th>Country</th><th>Follow-up</th><th>Updated</th></tr></thead>
+          <thead><tr><th>Lead</th><th>Type</th><th>Stage</th><th>Owner</th><th>Tags</th><th>Country</th><th>Follow-up</th><th>Updated</th><th>Actions</th></tr></thead>
           <tbody>
             {items.map(l => (
               <tr key={l.id} className="clickable" onClick={() => api.lead(l.id).then(setOpenLead)}>
@@ -88,10 +104,15 @@ export default function LeadsPage() {
                   {l.next_followup || '—'}
                 </td>
                 <td className="mono dim" style={{ fontSize: 12 }}>{l.updated_at ? new Date(l.updated_at + 'Z').toLocaleDateString() : ''}</td>
+                <td onClick={e => e.stopPropagation()}>
+                  <button className="ghost" disabled={transferring.has(l.id)} onClick={() => transferToCrm(l)}>
+                    {transferring.has(l.id) ? 'Transferring…' : '→ Add to CRM'}
+                  </button>
+                </td>
               </tr>
             ))}
             {items.length === 0 && (
-              <tr><td colSpan={8} className="dim" style={{ textAlign: 'center', padding: 28 }}>
+              <tr><td colSpan={9} className="dim" style={{ textAlign: 'center', padding: 28 }}>
                 No leads match. Add them from EPR Intel, HSN Explorer, Battery pages — or “+ New lead”.
               </td></tr>
             )}
@@ -99,13 +120,23 @@ export default function LeadsPage() {
         </table>
       </div>
 
-      {openLead && <LeadDrawer lead={openLead} onClose={() => { setOpenLead(null); load() }} onChanged={() => api.lead(openLead.id).then(setOpenLead)} />}
+      {openLead && (
+        <LeadDrawer
+          lead={openLead}
+          onClose={() => { setOpenLead(null); load() }}
+          onChanged={() => api.lead(openLead.id).then(setOpenLead)}
+          onTransfer={() => transferToCrm(openLead)}
+          transferring={transferring.has(openLead.id)}
+        />
+      )}
       {adding && <NewLeadModal onClose={() => setAdding(false)} onCreated={() => { setAdding(false); load() }} />}
     </div>
   )
 }
 
-function LeadDrawer({ lead, onClose, onChanged }: { lead: Lead; onClose: () => void; onChanged: () => void }) {
+function LeadDrawer({ lead, onClose, onChanged, onTransfer, transferring }: {
+  lead: Lead; onClose: () => void; onChanged: () => void; onTransfer: () => void; transferring: boolean
+}) {
   const { toast } = useRuns()
   const [note, setNote] = useState('')
   const [followup, setFollowup] = useState(lead.next_followup)
@@ -213,6 +244,9 @@ function LeadDrawer({ lead, onClose, onChanged }: { lead: Lead; onClose: () => v
               await api.deleteLead(lead.id); onClose()
             }
           }}>Delete lead</button>
+          <button disabled={transferring} onClick={onTransfer}>
+            {transferring ? 'Transferring…' : '→ Add to CRM'}
+          </button>
           <button className="secondary" onClick={onClose}>Close</button>
         </div>
       </div>

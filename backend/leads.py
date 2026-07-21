@@ -3,15 +3,18 @@ leads, tagged by user/type/stage, with a timestamped event timeline that links
 snapshots of the data the lead came from. Everything is also exposed through
 the read-only external API (/api/v1/leads, X-API-Key protected).
 
-Two-way sync with Mini-Mines CRM (Twenty):
-  - SalesHub → Twenty: on create/update, push to Twenty GraphQL API.
-  - Twenty → SalesHub: Twenty webhook POSTs to /api/twenty-webhook.
+One-way transfer to Mini-Mines CRM (Twenty) — replaces the old two-way sync:
+  - Leads created here (manual, EPR, HSN, Battery add-lead, etc.) stay in
+    SalesHub only; nothing pushes to Twenty automatically anymore.
+  - A user explicitly hits "Transfer to CRM" on a lead (POST
+    /api/leads/{id}/transfer-to-crm), which creates it in Twenty via the
+    GraphQL API and then deletes it from SalesHub — the lead moves, it
+    doesn't get copied. All further work on it happens in Twenty.
 """
 import hashlib
 import json
 import os
 import secrets
-import threading
 from datetime import datetime, date
 
 import requests as http_requests
@@ -23,109 +26,62 @@ from .db import SessionLocal, Lead, LeadEvent, ApiKey
 router = APIRouter(prefix='/api/leads', tags=['leads'])
 keys_router = APIRouter(prefix='/api/keys', tags=['api-keys'])
 v1_router = APIRouter(prefix='/api/v1', tags=['external-v1'])
-twenty_router = APIRouter(prefix='/api/twenty-webhook', tags=['twenty-sync'])
 
 LEAD_TYPES = ('chemical', 'epr', 'battery', 'other')
-STAGES = ('new', 'contacted', 'in_talks', 'deal', 'dead')
+STAGES = ('new', 'contacted', 'in_talks', 'deal', 'dead', 'qualified', 'disqualified', 'lost', 'won', 'proposal', 'negotiation')
 
 
-# ── Twenty CRM sync helpers ───────────────────────────────────────────────
+# ── Twenty CRM transfer helper ────────────────────────────────────────────
 TWENTY_API_URL = os.environ.get('TWENTY_API_URL', '')          # e.g. https://miniminescrm.twenty.com/api
 TWENTY_API_KEY = os.environ.get('TWENTY_API_KEY', '')          # Twenty workspace API key
 
-SH_TO_TWENTY_STATUS = {
-    'new': 'NEW', 'contacted': 'CONTACTED',
-    'in_talks': 'QUALIFIED', 'deal': 'QUALIFIED', 'dead': 'DISQUALIFIED',
-}
-TWENTY_TO_SH_STAGE = {
-    'NEW': 'new', 'CONTACTED': 'contacted',
-    'QUALIFIED': 'in_talks', 'DISQUALIFIED': 'dead',
-}
-
-
-def _push_to_twenty(lead_dict: dict, event: str = 'created'):
-    """Fire-and-forget: push a SalesHub lead to Twenty CRM via GraphQL.
-    Runs in a background thread so the SalesHub response is never delayed."""
+def _create_lead_in_twenty(lead_dict: dict) -> str:
+    """Create a lead in Twenty CRM via GraphQL and return its new id.
+    Synchronous and raises on any failure — the caller must not delete the
+    SalesHub lead unless this succeeds."""
     if not TWENTY_API_URL or not TWENTY_API_KEY:
-        return  # sync not configured — skip silently
+        raise RuntimeError('Twenty CRM sync is not configured (TWENTY_API_URL / TWENTY_API_KEY missing)')
 
-    def _do():
-        try:
-            twenty_status = SH_TO_TWENTY_STATUS.get(lead_dict.get('stage', ''), 'NEW')
-            headers = {
-                'Authorization': f'Bearer {TWENTY_API_KEY}',
-                'Content-Type': 'application/json',
-            }
-            # If this lead already has a Twenty ID stored, update; otherwise create
-            twenty_id = lead_dict.get('entity_ref', '') if lead_dict.get('entity_kind') == 'twenty_crm' else ''
+    twenty_status = (lead_dict.get('stage') or 'new').upper()
+    headers = {
+        'Authorization': f'Bearer {TWENTY_API_KEY}',
+        'Content-Type': 'application/json',
+    }
+    mutation = '''
+    mutation CreateLead($input: LeadCreateInput!) {
+        createLead(data: $input) { id }
+    }'''
+    variables = {
+        'input': {
+            'name': lead_dict.get('contact_name') or lead_dict.get('name', ''),
+            'company': lead_dict.get('name', ''),
+            'source': 'SALESHUB',
+            'status': twenty_status,
+        }
+    }
 
-            if twenty_id:
-                # UPDATE existing Twenty lead
-                mutation = '''
-                mutation UpdateLead($id: ID!, $input: LeadUpdateInput!) {
-                    updateLead(id: $id, data: $input) { id }
-                }'''
-                variables = {
-                    'id': twenty_id,
-                    'input': {
-                        'name': lead_dict.get('contact_name') or lead_dict.get('name', ''),
-                        'company': lead_dict.get('name', ''),
-                        'source': 'SALESHUB',
-                        'status': twenty_status,
-                    }
-                }
-            else:
-                # CREATE new lead in Twenty
-                mutation = '''
-                mutation CreateLead($input: LeadCreateInput!) {
-                    createLead(data: $input) { id }
-                }'''
-                variables = {
-                    'input': {
-                        'name': lead_dict.get('contact_name') or lead_dict.get('name', ''),
-                        'company': lead_dict.get('name', ''),
-                        'source': 'SALESHUB',
-                        'status': twenty_status,
-                    }
-                }
+    # Ensure we hit the root /graphql, even if TWENTY_API_URL ends in /api
+    base_url = TWENTY_API_URL
+    if base_url.endswith('/api'):
+        base_url = base_url[:-4]
+    elif base_url.endswith('/'):
+        base_url = base_url[:-1]
 
-            # Ensure we hit the root /graphql, even if TWENTY_API_URL ends in /api
-            base_url = TWENTY_API_URL
-            if base_url.endswith('/api'):
-                base_url = base_url[:-4]
-            elif base_url.endswith('/'):
-                base_url = base_url[:-1]
-
-            resp = http_requests.post(
-                f'{base_url}/graphql',
-                headers=headers,
-                json={'query': mutation, 'variables': variables},
-                timeout=10,
-            )
-            if resp.ok:
-                print(f'[Twenty Sync] {event} lead pushed OK')
-                if not twenty_id:
-                    try:
-                        data = resp.json()
-                        new_id = data['data']['createLead']['id']
-                        from .db import SessionLocal, Lead
-                        session = SessionLocal()
-                        try:
-                            l = session.get(Lead, lead_dict['id'])
-                            if l:
-                                l.entity_kind = 'twenty_crm'
-                                l.entity_ref = new_id
-                                session.commit()
-                        finally:
-                            session.close()
-                    except Exception as e:
-                        print(f'[Twenty Sync] Failed to save returned ID: {e}')
-            else:
-                print(f'[Twenty Sync] push failed: {resp.status_code} {resp.text[:200]}')
-        except Exception as e:
-            print(f'[Twenty Sync] error: {e}')
-
-    threading.Thread(target=_do, daemon=True).start()
+    resp = http_requests.post(
+        f'{base_url}/graphql',
+        headers=headers,
+        json={'query': mutation, 'variables': variables},
+        timeout=15,
+    )
+    if not resp.ok:
+        raise RuntimeError(f'Twenty CRM responded {resp.status_code}: {resp.text[:200]}')
+    data = resp.json()
+    if data.get('errors'):
+        raise RuntimeError(f'Twenty CRM GraphQL error: {data["errors"][0].get("message", data["errors"])}')
+    try:
+        return data['data']['createLead']['id']
+    except (KeyError, TypeError):
+        raise RuntimeError(f'Unexpected Twenty CRM response: {data}')
 
 
 # ── internal CRUD ─────────────────────────────────────────────────────────
@@ -277,8 +233,6 @@ def create_lead(body: LeadIn):
         _add_event(session, l.id, 'created',
                    f'Lead created from {body.source}', body.data, body.user_name)
         session.commit()
-        if body.user_name != '__twenty_sync__':  # prevent infinite loop
-            _push_to_twenty(_lead_dict(l), 'created')
         return {'id': l.id, 'existing': False}
     finally:
         session.close()
@@ -321,11 +275,41 @@ def update_lead(lead_id: int, body: LeadPatch):
                 setattr(l, f, v.strip())
         l.updated_at = datetime.utcnow()
         session.commit()
-        if body.user_name != '__twenty_sync__':  # prevent infinite loop
-            _push_to_twenty(_lead_dict(l), 'updated')
         return _lead_dict(l)
     finally:
         session.close()
+
+
+@router.post('/{lead_id}/transfer-to-crm')
+def transfer_lead_to_crm(lead_id: int):
+    """Manually move a SalesHub lead into Twenty CRM: create it there via
+    GraphQL, then delete it here. One-way — nothing stays behind, and from
+    this point on the lead is managed entirely inside Twenty."""
+    session = SessionLocal()
+    try:
+        l = session.get(Lead, lead_id)
+        if not l:
+            raise HTTPException(404, 'Lead not found')
+        lead_dict = _lead_dict(l)
+    finally:
+        session.close()
+
+    try:
+        twenty_id = _create_lead_in_twenty(lead_dict)
+    except Exception as e:
+        raise HTTPException(502, f'Transfer to Twenty CRM failed: {e}')
+
+    session = SessionLocal()
+    try:
+        l = session.get(Lead, lead_id)
+        if l:
+            session.query(LeadEvent).filter(LeadEvent.lead_id == lead_id).delete()
+            session.delete(l)
+            session.commit()
+    finally:
+        session.close()
+
+    return {'ok': True, 'twenty_id': twenty_id}
 
 
 @router.delete('/{lead_id}')
@@ -481,127 +465,5 @@ def v1_lead(request: Request, lead_id: int):
         events = (session.query(LeadEvent).filter(LeadEvent.lead_id == lead_id)
                   .order_by(LeadEvent.id).all())
         return _lead_dict(l, events)
-    finally:
-        session.close()
-
-
-# ── Twenty CRM → SalesHub webhook (incoming) ─────────────────────────────
-TWENTY_WEBHOOK_SECRET = os.environ.get('TWENTY_WEBHOOK_SECRET', '')
-
-# In-memory log of recent webhook payloads for debugging
-_recent_webhooks = []
-
-@twenty_router.get('')
-def get_recent_webhooks():
-    return _recent_webhooks[-20:]
-
-@twenty_router.post('')
-async def receive_twenty_webhook(request: Request):
-    """Twenty CRM fires this webhook on lead create/update."""
-
-    body = await request.json()
-    _recent_webhooks.append({'time': datetime.utcnow().isoformat(), 'body': body})
-    if len(_recent_webhooks) > 50:
-        _recent_webhooks.pop(0)
-
-    # Optional: verify shared secret
-    if TWENTY_WEBHOOK_SECRET:
-        supplied = request.headers.get('x-webhook-secret', '')
-        if supplied != TWENTY_WEBHOOK_SECRET:
-            raise HTTPException(403, 'Invalid webhook secret')
-
-    body = await request.json()
-    
-    # Robustly extract the record from Twenty's webhook payload variations
-    record = body
-    if isinstance(body, dict):
-        if 'events' in body and isinstance(body['events'], list) and body['events']:
-            event = body['events'][0]
-            if 'payload' in event:
-                record = event['payload']
-            elif 'data' in event and 'payload' in event['data']:
-                record = event['data']['payload']
-            elif 'object' in event:
-                record = event['object']
-        elif 'data' in body and 'payload' in body['data']:
-            record = body['data']['payload']
-        elif 'record' in body:
-            record = body['record']
-        elif 'object' in body:
-            record = body['object']
-
-    if not record or not isinstance(record, dict):
-        return {'status': 'ignored', 'reason': 'no valid record found'}
-
-    twenty_id = record.get('id', '')
-    twenty_name = record.get('name', '')
-    twenty_company = record.get('company', '')
-    
-    # Ensure uppercase status for matching
-    raw_status = record.get('status', 'NEW')
-    twenty_status = str(raw_status).upper() if raw_status else 'NEW'
-    twenty_source = record.get('source', '')
-
-    sh_stage = TWENTY_TO_SH_STAGE.get(twenty_status, 'new')
-
-    # Combine Lead Name + Company for SalesHub's `name` field
-    combined_name = twenty_company or twenty_name
-    if twenty_name and twenty_company and twenty_name != twenty_company:
-        combined_name = f'{twenty_company} - {twenty_name}'
-
-    session = SessionLocal()
-    try:
-        # Look for existing SalesHub lead linked to this Twenty ID
-        existing = (session.query(Lead)
-                    .filter(Lead.entity_kind == 'twenty_crm', Lead.entity_ref == twenty_id)
-                    .first())
-
-        if existing:
-            # UPDATE
-            old_stage = existing.stage
-            existing.name = combined_name
-            existing.contact_name = twenty_name
-            existing.stage = sh_stage
-            existing.updated_at = datetime.utcnow()
-            if old_stage != sh_stage:
-                _add_event(session, existing.id, 'stage_change',
-                           f'{old_stage} → {sh_stage} (synced from Twenty CRM)',
-                           user='__twenty_sync__')
-            session.commit()
-            return {'status': 'updated', 'id': existing.id}
-        else:
-            # Check if this is an echo webhook from a lead we just created, 
-            # or a manual lead with the exact same name, to avoid duplicates.
-            dup = session.query(Lead).filter(Lead.name == combined_name).first()
-            if dup:
-                dup.entity_kind = 'twenty_crm'
-                dup.entity_ref = twenty_id
-                old_stage = dup.stage
-                dup.stage = sh_stage
-                dup.updated_at = datetime.utcnow()
-                if old_stage != sh_stage:
-                    _add_event(session, dup.id, 'stage_change',
-                               f'{old_stage} → {sh_stage} (synced from Twenty CRM)',
-                               user='__twenty_sync__')
-                session.commit()
-                return {'status': 'linked', 'id': dup.id}
-
-            # CREATE
-            l = Lead(
-                name=combined_name,
-                contact_name=twenty_name,
-                lead_type='other',
-                stage=sh_stage,
-                source='twenty_crm',
-                entity_kind='twenty_crm',
-                entity_ref=twenty_id,
-                created_by='__twenty_sync__',
-            )
-            session.add(l)
-            session.flush()
-            _add_event(session, l.id, 'created',
-                       'Lead synced from Twenty CRM', user='__twenty_sync__')
-            session.commit()
-            return {'status': 'created', 'id': l.id}
     finally:
         session.close()
