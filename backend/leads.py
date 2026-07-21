@@ -488,12 +488,21 @@ def v1_lead(request: Request, lead_id: int):
 # ── Twenty CRM → SalesHub webhook (incoming) ─────────────────────────────
 TWENTY_WEBHOOK_SECRET = os.environ.get('TWENTY_WEBHOOK_SECRET', '')
 
+# In-memory log of recent webhook payloads for debugging
+_recent_webhooks = []
+
+@twenty_router.get('')
+def get_recent_webhooks():
+    return _recent_webhooks[-20:]
 
 @twenty_router.post('')
 async def receive_twenty_webhook(request: Request):
-    """Twenty CRM fires this webhook on lead create/update.
-    Maps Twenty fields back into SalesHub and creates/updates the lead.
-    Uses user_name='__twenty_sync__' so the outgoing push is skipped (no loop)."""
+    """Twenty CRM fires this webhook on lead create/update."""
+
+    body = await request.json()
+    _recent_webhooks.append({'time': datetime.utcnow().isoformat(), 'body': body})
+    if len(_recent_webhooks) > 50:
+        _recent_webhooks.pop(0)
 
     # Optional: verify shared secret
     if TWENTY_WEBHOOK_SECRET:
