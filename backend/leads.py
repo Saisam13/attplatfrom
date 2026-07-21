@@ -502,14 +502,35 @@ async def receive_twenty_webhook(request: Request):
             raise HTTPException(403, 'Invalid webhook secret')
 
     body = await request.json()
-    record = body.get('record') or body.get('object') or body
-    if not record:
-        return {'status': 'ignored'}
+    
+    # Robustly extract the record from Twenty's webhook payload variations
+    record = body
+    if isinstance(body, dict):
+        if 'events' in body and isinstance(body['events'], list) and body['events']:
+            event = body['events'][0]
+            if 'payload' in event:
+                record = event['payload']
+            elif 'data' in event and 'payload' in event['data']:
+                record = event['data']['payload']
+            elif 'object' in event:
+                record = event['object']
+        elif 'data' in body and 'payload' in body['data']:
+            record = body['data']['payload']
+        elif 'record' in body:
+            record = body['record']
+        elif 'object' in body:
+            record = body['object']
+
+    if not record or not isinstance(record, dict):
+        return {'status': 'ignored', 'reason': 'no valid record found'}
 
     twenty_id = record.get('id', '')
     twenty_name = record.get('name', '')
     twenty_company = record.get('company', '')
-    twenty_status = record.get('status', 'NEW')
+    
+    # Ensure uppercase status for matching
+    raw_status = record.get('status', 'NEW')
+    twenty_status = str(raw_status).upper() if raw_status else 'NEW'
     twenty_source = record.get('source', '')
 
     sh_stage = TWENTY_TO_SH_STAGE.get(twenty_status, 'new')
