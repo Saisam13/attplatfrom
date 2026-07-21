@@ -104,6 +104,22 @@ def _push_to_twenty(lead_dict: dict, event: str = 'created'):
             )
             if resp.ok:
                 print(f'[Twenty Sync] {event} lead pushed OK')
+                if not twenty_id:
+                    try:
+                        data = resp.json()
+                        new_id = data['data']['createLead']['id']
+                        from .db import SessionLocal, Lead
+                        session = SessionLocal()
+                        try:
+                            l = session.get(Lead, lead_dict['id'])
+                            if l:
+                                l.entity_kind = 'twenty_crm'
+                                l.entity_ref = new_id
+                                session.commit()
+                        finally:
+                            session.close()
+                    except Exception as e:
+                        print(f'[Twenty Sync] Failed to save returned ID: {e}')
             else:
                 print(f'[Twenty Sync] push failed: {resp.status_code} {resp.text[:200]}')
         except Exception as e:
