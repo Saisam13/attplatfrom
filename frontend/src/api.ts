@@ -211,6 +211,9 @@ export const api = {
   eprTrade: (id: number) => f(`/api/epr/companies/${id}/trade`).then(r => j<any>(r)),
   eprSummary: () => f('/api/epr/summary').then(r => j<any>(r)),
   eprCrossLinks: () => f('/api/epr/cross-links').then(r => j<any[]>(r)),
+  eprMaterials: () => f('/api/epr/materials').then(r => j<EprMaterial[]>(r)),
+  eprUpdateMaterial: (id: number, body: object) =>
+    f(`/api/epr/materials/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => j<any>(r)),
 
   // ── HSN Explorer ───────────────────────────────────────────
   hsnSearch: (q: string) => f(`/api/hsn/search?q=${encodeURIComponent(q)}`).then(r => j<HsnEntry[]>(r)),
@@ -285,10 +288,18 @@ export interface EprCompany {
   address: string; email: string; state: string; battery_chemistry: string
   target_tons: number; credits: number; import_qty: number
   priority_score: number; gap_tons: number
+  grade: number; grade_label: string;
+  materials?: Record<string, any>;
   source_file: string; uploaded_by: string; created_at: string
   has_research: boolean
   research?: any
   research_meta?: { search_provider: string; llm_provider: string; updated_at: string }
+}
+
+export interface EprMaterial {
+  id: number; name: string; slug: string;
+  overall_weight: number; normalized_share: number;
+  active: boolean; display_order: number; company_count: number;
 }
 
 export interface HsnEntry {

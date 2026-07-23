@@ -503,7 +503,7 @@ def list_companies(
 
         rows = q.offset(offset).limit(limit).all()
         researched = {r.company_id for r in session.query(EprResearch.company_id).all()}
-        include_breakdown = bool(material)  # per-material filter -> include breakdown
+        include_breakdown = True  # Always include breakdown for dynamic columns
 
         items = [{**_company_dict(c, include_breakdown=include_breakdown),
                   'has_research': c.id in researched}

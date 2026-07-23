@@ -58,9 +58,8 @@ def _anchor_score(value: float, floor: float, ceiling: float) -> float:
 
 def _normalize_weights(w_target: float, w_credit: float):
     """Q10: Normalize target+credit weights to sum 1. Prevents max_score > 100."""
-    w_target = max(0.0, w_target)
-    w_credit = max(0.0, w_credit)
-    total = w_target + w_credit
+    # Allow negative values for dynamic filtering
+    total = abs(w_target) + abs(w_credit)
     if total <= 0:
         return 0.5, 0.5
     return w_target / total, w_credit / total

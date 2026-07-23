@@ -14,7 +14,6 @@ export default function EprPage() {
   const [sort, setSort] = useState('priority_score')
   const [order, setOrder] = useState<'asc' | 'desc'>('desc')
   const [summary, setSummary] = useState<any>(null)
-  const [weights, setWeights] = useState({ target_tons: 1.0, credits: 0.5 })
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const nav = useNavigate()
@@ -22,11 +21,13 @@ export default function EprPage() {
 
   const load = () => {
     api.eprCompanies({ search, sort, order, limit: '500' })
-      .then(r => { setItems(r.items); setTotal(r.total); if (r.weights) setWeights(r.weights) })
+      .then(r => { setItems(r.items); setTotal(r.total); })
       .catch(e => toast('error', String(e.message || e)))
     api.eprSummary().then(setSummary).catch(() => {})
   }
   useEffect(load, [search, sort, order])
+
+  const activeMaterials = summary?.materials ? Object.values(summary.materials) : []
 
   const upload = async (file: File, mode: string) => {
     setUploading(true)
@@ -57,8 +58,7 @@ export default function EprPage() {
     <div>
       <h1>EPR Producer Intel</h1>
       <div className="subtitle">
-        CPCB “EPR Targets for Producers” intelligence — priority = target × {weights.target_tons.toFixed(1)} +
-        credits × {weights.credits.toFixed(1)} (editable in Settings).
+        CPCB “EPR Targets for Producers” intelligence. Priority score (0-100) dynamically factors Target vs. Credits.
         Click a company for the AI Sourcing Agent console.
       </div>
 
@@ -75,10 +75,11 @@ export default function EprPage() {
       <div className="panel" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         <strong>Upload targets file:</strong>
         <select value={material} onChange={e => setMaterial(e.target.value)} disabled={uploading} style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)' }}>
-          <option value="lithium">Lithium</option>
-          <option value="cobalt">Cobalt</option>
-          <option value="nickel">Nickel</option>
-          <option value="manganese">Manganese</option>
+          {activeMaterials.map((m: any) => (
+            <option key={m.slug || m.name} value={m.slug || m.name.toLowerCase().replace(/[^a-z0-9_]/g, '')}>
+              {m.name}
+            </option>
+          ))}
         </select>
         <input ref={fileRef} type="file" accept=".xlsx" disabled={uploading}
           onChange={e => { const f = e.target.files?.[0]; if (f) upload(f, 'merge') }} />
@@ -101,24 +102,41 @@ export default function EprPage() {
         <table>
           <thead>
             <tr>
+              <th>Sr. No.</th>
               <th className="clickable" onClick={() => clickSort('company_name')}>Company{arrow('company_name')}</th>
               <th>State</th>
-              <th className="clickable" onClick={() => clickSort('target_tons')}>Target (t){arrow('target_tons')}</th>
-              <th className="clickable" onClick={() => clickSort('credits')}>Credits (t){arrow('credits')}</th>
-              <th className="clickable" onClick={() => clickSort('gap_tons')}>Gap (t){arrow('gap_tons')}</th>
+              {activeMaterials.map((m: any) => (
+                <th key={m.name}>{m.name}</th>
+              ))}
               <th className="clickable" onClick={() => clickSort('priority_score')}>Priority{arrow('priority_score')}</th>
               <th>Research</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {items.map(c => (
+            {items.map((c, idx) => (
               <tr key={c.id} className="clickable" onClick={() => nav(`/epr/${c.id}`)}>
+                <td className="dim">{idx + 1}</td>
                 <td style={{ fontWeight: 600 }}>{c.company_name}</td>
                 <td className="dim">{c.state || '—'}</td>
-                <td className="mono">{fmt.num(c.target_tons)}</td>
-                <td className="mono">{fmt.num(c.credits)}</td>
-                <td className="mono" style={{ color: c.gap_tons > 0 ? 'var(--orange)' : 'var(--dim)' }}>{fmt.num(c.gap_tons)}</td>
+                
+                {activeMaterials.map((m: any) => {
+                  const slug = m.name.toLowerCase().replace(/[^a-z0-9_]/g, '')
+                  const mData = c.materials?.[slug]
+                  if (!mData) return <td key={m.name} className="dim">—</td>
+                  
+                  return (
+                    <td key={m.name} className="mono" style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+                      <div style={{ color: 'var(--orange)', fontWeight: 600 }}>
+                        T: {mData.target !== null ? fmt.num(mData.target) : '—'}
+                      </div>
+                      <div style={{ color: 'var(--teal)' }}>
+                        A: {mData.credits !== null ? fmt.num(mData.credits) : '—'}
+                      </div>
+                    </td>
+                  )
+                })}
+                
                 <td className="mono" style={{ color: 'var(--teal)', fontWeight: 700 }}>{c.priority_score.toFixed(1)}</td>
                 <td>{c.has_research
                   ? <span className="success" style={{ fontSize: 12 }}>✓ done</span>
@@ -127,12 +145,12 @@ export default function EprPage() {
                 <td onClick={e => e.stopPropagation()}>
                   <AddLeadButton name={c.company_name} leadType="epr" source="epr"
                     entityKind="epr_company" entityRef={c.id}
-                    data={{ target_tons: c.target_tons, credits: c.credits, gap_tons: c.gap_tons, priority_score: c.priority_score, state: c.state }} />
+                    data={{ priority_score: c.priority_score, state: c.state }} />
                 </td>
               </tr>
             ))}
             {items.length === 0 && (
-              <tr><td colSpan={8} className="dim" style={{ textAlign: 'center', padding: 30 }}>
+              <tr><td colSpan={activeMaterials.length + 5} className="dim" style={{ textAlign: 'center', padding: 30 }}>
                 No producers yet — upload the CPCB EPR targets .xlsx above.
               </td></tr>
             )}
