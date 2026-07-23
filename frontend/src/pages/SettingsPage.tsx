@@ -144,95 +144,189 @@ function AiProvidersPanel({ s, save, toast }: any) {
 
 function EprWeightsPanel({ s, save, toast }: any) {
   const [mats, setMats] = useState<any[]>([])
-  const w = s.epr_weights || { target_tons: 1.0, credits: 0.5 }
-  const [target, setTarget] = useState<number>(w.target_tons)
-  const [credits, setCredits] = useState<number>(w.credits)
-  const [dirtyRow, setDirtyRow] = useState(false)
+  const [edits, setEdits] = useState<Record<number, any>>({})
+  const [dirty, setDirty] = useState(false)
+  const [addName, setAddName] = useState('')
 
-  const loadMats = () => { api.eprMaterials().then(setMats).catch(() => {}) }
+  const loadMats = () => {
+    api.eprMaterials().then(data => {
+      setMats(data)
+      setEdits({})
+      setDirty(false)
+    }).catch(() => {})
+  }
   useEffect(loadMats, [])
 
-  const saveMat = async (id: number, active: boolean, weight: number) => {
+  const getVal = (m: any, field: string) => {
+    if (edits[m.id] && field in edits[m.id]) return edits[m.id][field]
+    return m[field]
+  }
+
+  const setField = (id: number, field: string, value: any) => {
+    setEdits(prev => ({ ...prev, [id]: { ...prev[id], [field]: value } }))
+    setDirty(true)
+  }
+
+  const overallTotal = mats.reduce((acc, m) => acc + (getVal(m, 'active') ? Number(getVal(m, 'overall_weight')) || 0 : 0), 0)
+  const overallOk = Math.abs(overallTotal - 1) < 0.001
+
+  const normalizeOverall = () => {
+    const total = mats.reduce((acc, m) => acc + (getVal(m, 'active') ? Number(getVal(m, 'overall_weight')) || 0 : 0), 0)
+    if (total <= 0) return toast('error', 'Total active weight is 0')
+    mats.forEach(m => {
+      if (getVal(m, 'active')) {
+        setField(m.id, 'overall_weight', Number((Number(getVal(m, 'overall_weight')) / total).toFixed(4)))
+      }
+    })
+  }
+
+  const normalizeRow = (m: any) => {
+    const tw = Math.abs(Number(getVal(m, 'target_weight')) || 0)
+    const cw = Math.abs(Number(getVal(m, 'credit_weight')) || 0)
+    const total = tw + cw
+    if (total <= 0) return toast('error', 'Target + Credit weight is 0')
+    setField(m.id, 'target_weight', Number((tw / total).toFixed(4)))
+    setField(m.id, 'credit_weight', Number((cw / total).toFixed(4)))
+  }
+
+  const saveAll = async () => {
     try {
-      await api.eprUpdateMaterial(id, { active, overall_weight: weight })
+      for (const m of mats) {
+        const ow = Number(getVal(m, 'overall_weight'))
+        const tw = Number(getVal(m, 'target_weight'))
+        const cw = Number(getVal(m, 'credit_weight'))
+        const active = getVal(m, 'active')
+        await api.eprUpdateMaterial(m.id, {
+          overall_weight: ow,
+          target_weight: tw,
+          credit_weight: cw,
+          active,
+        })
+      }
+      toast('success', 'Material weights saved — grades recomputed')
       loadMats()
-    } catch (e: any) { toast('error', String(e.message || e)) }
+    } catch (e: any) {
+      toast('error', String(e.message || e))
+    }
   }
 
-  const normalizeGlobals = () => {
-    const total = mats.reduce((acc, m) => acc + (m.active ? Number(m.overall_weight) : 0), 0)
-    if (total <= 0) return toast('error', 'Total weight is 0')
-    Promise.all(mats.filter(m => m.active).map(m => 
-      api.eprUpdateMaterial(m.id, { overall_weight: Number((m.overall_weight / total).toFixed(4)) })
-    )).then(() => {
-      toast('success', 'Globals normalized')
+  const addMaterial = async () => {
+    const name = addName.trim()
+    if (!name) return
+    try {
+      await api.eprCreateMaterial({ name, overall_weight: 0 })
+      toast('success', `Material "${name}" added`)
+      setAddName('')
       loadMats()
-    }).catch(e => toast('error', String(e.message || e)))
-  }
-
-  const normalizeRow = () => {
-    const total = Math.abs(target) + Math.abs(credits)
-    if (total <= 0) return toast('error', 'Total weight is 0')
-    setTarget(Number((target / total).toFixed(4)))
-    setCredits(Number((credits / total).toFixed(4)))
-    setDirtyRow(true)
+    } catch (e: any) {
+      toast('error', String(e.message || e))
+    }
   }
 
   return (
     <div className="panel">
-      <h2 style={{ marginTop: 0 }}>EPR Multi-Material Priorities</h2>
-      <div className="dim" style={{ fontSize: 13, marginBottom: 10 }}>
-        Row-wise: Target vs. Credits. Column-wise (Globals): Material weights. Both should sum to 1.0.
-      </div>
-      
-      <div style={{ display: 'flex', gap: 40, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <h3>Row-wise (Target & Credits)</h3>
-          <div className="filters">
-            <label className="dim">Target weight</label>
-            <input type="number" step={0.1} value={target} style={{ width: 90 }}
-              onChange={e => { setTarget(Number(e.target.value)); setDirtyRow(true) }} />
-            <label className="dim">Credits weight (allow negative)</label>
-            <input type="number" step={0.1} value={credits} style={{ width: 90 }}
-              onChange={e => { setCredits(Number(e.target.value)); setDirtyRow(true) }} />
-          </div>
-          <div className="filters" style={{ marginTop: 12 }}>
-            <button className="secondary" onClick={normalizeRow}>Normalize Row</button>
-            <button disabled={!dirtyRow}
-              onClick={() => {
-                save({ epr_weights: { target_tons: target, credits } }, 'EPR row weights saved')
-                setDirtyRow(false)
-              }}>
-              Save Row
-            </button>
+          <h2 style={{ marginTop: 0, color: 'var(--teal)' }}>Material Management &amp; Priority Weights</h2>
+          <div className="dim" style={{ fontSize: 13, marginBottom: 10 }}>
+            Configure which materials are tracked and their priority calculation weights.
           </div>
         </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input type="text" placeholder="New material name" value={addName}
+            onChange={e => setAddName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') addMaterial() }}
+            style={{ width: 180, padding: '6px 10px' }} />
+          <button className="secondary" onClick={addMaterial} disabled={!addName.trim()}>+ Add Material</button>
+        </div>
+      </div>
 
-        <div>
-          <h3>Column-wise (Globals)</h3>
-          <table>
-            <thead><tr><th>Material</th><th>Active</th><th>Global Weight</th><th>Share</th></tr></thead>
-            <tbody>
-              {mats.map(m => (
-                <tr key={m.id}>
+      <div className="panel" style={{ background: 'var(--bg-light)', padding: '10px 14px', marginBottom: 14, fontSize: 13 }}>
+        <strong>Priority Score Formula (Scaled 1-100):</strong>{' '}
+        <span className="mono" style={{ color: 'var(--teal)' }}>
+          SUM( [Score(Target) × Target Weight + Score(Credits) × Credit Weight] × Overall Weight )
+        </span>
+        <br />
+        <span className="dim">* Tip: For mathematical purity, Target Weight + Credit Weight should equal 1.0 per row.</span>
+      </div>
+
+      <div style={{ overflowX: 'auto' }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Material Name</th>
+              <th>Active</th>
+              <th style={{ minWidth: 130 }}>
+                Overall Weight{' '}
+                <button className="ghost" style={{ fontSize: 11, padding: '2px 6px' }} onClick={normalizeOverall}>Normalize</button>
+              </th>
+              <th style={{ minWidth: 120 }}>Target Weight</th>
+              <th style={{ minWidth: 120 }}>Credit Weight</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {mats.map(m => {
+              const tw = Number(getVal(m, 'target_weight')) || 0
+              const cw = Number(getVal(m, 'credit_weight')) || 0
+              const rowTotal = tw + cw
+              const rowOk = Math.abs(rowTotal - 1) < 0.001
+              return (
+                <tr key={m.id} style={{ opacity: getVal(m, 'active') ? 1 : 0.5 }}>
                   <td style={{ fontWeight: 600 }}>{m.name}</td>
                   <td>
-                    <input type="checkbox" checked={m.active}
-                      onChange={e => saveMat(m.id, e.target.checked, m.overall_weight)} />
+                    <label className="toggle-switch">
+                      <input type="checkbox" checked={!!getVal(m, 'active')}
+                        onChange={e => setField(m.id, 'active', e.target.checked)} />
+                      <span className="toggle-slider" />
+                    </label>
                   </td>
                   <td>
-                    <input type="number" step={0.1} value={m.overall_weight} style={{ width: 80 }}
-                      onChange={e => saveMat(m.id, m.active, Number(e.target.value))} />
+                    <input type="number" step={0.01} min={0}
+                      value={getVal(m, 'overall_weight')} style={{ width: 90, background: 'var(--bg-light)' }}
+                      onChange={e => setField(m.id, 'overall_weight', Number(e.target.value))} />
                   </td>
-                  <td className="mono dim">{m.normalized_share}%</td>
+                  <td>
+                    <input type="number" step={0.01} min={0}
+                      value={getVal(m, 'target_weight')} style={{ width: 90 }}
+                      onChange={e => setField(m.id, 'target_weight', Number(e.target.value))} />
+                  </td>
+                  <td>
+                    <input type="number" step={0.01} min={0}
+                      value={getVal(m, 'credit_weight')} style={{ width: 90 }}
+                      onChange={e => setField(m.id, 'credit_weight', Number(e.target.value))} />
+                  </td>
+                  <td>
+                    <button className="ghost" onClick={() => normalizeRow(m)}
+                      title="Normalize Target + Credit to sum 1.0"
+                      style={{ fontSize: 12 }}>
+                      Normalize Row
+                    </button>
+                    {!rowOk && <span className="dim" style={{ fontSize: 11, marginLeft: 6 }}>Σ={rowTotal.toFixed(2)}</span>}
+                  </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          <div style={{ marginTop: 12 }}>
-            <button className="secondary" onClick={normalizeGlobals}>Normalize Globals</button>
-          </div>
-        </div>
+              )
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={2} style={{ textAlign: 'right', fontWeight: 600 }}>Overall Weight Total:</td>
+              <td>
+                <span className={overallOk ? 'success' : 'error'} style={{ fontWeight: 700 }}>
+                  {overallTotal.toFixed(2)}
+                </span>
+                {!overallOk && <span className="dim" style={{ fontSize: 11, marginLeft: 4 }}>(should be 1.0)</span>}
+              </td>
+              <td colSpan={3} />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+        <button onClick={saveAll} disabled={!dirty} style={{ padding: '8px 24px' }}>
+          Save Materials
+        </button>
       </div>
     </div>
   )

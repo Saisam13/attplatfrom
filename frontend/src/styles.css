@@ -290,6 +290,20 @@ td.heat span { position: relative; z-index: 1; }
 .stage-col .n { font-size: 22px; font-weight: 800; color: var(--teal); }
 .stage-col .l { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; }
 
+/* ── toggle switch ── */
+.toggle-switch { position: relative; display: inline-block; width: 42px; height: 22px; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; inset: 0; background: var(--border); border-radius: 22px;
+  cursor: pointer; transition: background 0.2s;
+}
+.toggle-slider::before {
+  content: ''; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px;
+  background: white; border-radius: 50%; transition: transform 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider { background: var(--teal); }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
+
 /* ── draft output ── */
 .draft-box {
   background: var(--navy); border: 1px solid var(--border); border-radius: 8px;

@@ -297,7 +297,7 @@ async def upload_epr(
             t_status = rec.get('target_tons_status', 'absent')
 
             if existing_mat is None:
-                session.add(EprCompanyMaterial(
+                new_mat = EprCompanyMaterial(
                     company_id=row.id,
                     material_id=mat_obj.id,
                     target_tons=t_val,
@@ -306,7 +306,9 @@ async def upload_epr(
                     parse_status=t_status,
                     source_file=file.filename or '',
                     uploaded_by=user_name.strip(),
-                ))
+                )
+                session.add(new_mat)
+                session.flush()
                 mat_created += 1
             else:
                 existing_mat.target_tons = t_val
@@ -399,6 +401,8 @@ def list_materials():
             out.append({
                 'id': m.id, 'name': m.name, 'slug': m.slug,
                 'overall_weight': m.overall_weight,
+                'target_weight': m.target_weight if m.target_weight is not None else 0.5,
+                'credit_weight': m.credit_weight if m.credit_weight is not None else 0.5,
                 'normalized_share': round(
                     (m.overall_weight / total_weight * 100) if total_weight > 0 and m.active else 0, 1
                 ),
@@ -424,6 +428,10 @@ def update_material(material_id: int, body: dict):
             if w < 0:
                 raise HTTPException(400, 'overall_weight must be >= 0')
             m.overall_weight = w
+        if 'target_weight' in body:
+            m.target_weight = float(body['target_weight'])
+        if 'credit_weight' in body:
+            m.credit_weight = float(body['credit_weight'])
         if 'active' in body:
             m.active = 1 if body['active'] else 0
         if 'display_order' in body:

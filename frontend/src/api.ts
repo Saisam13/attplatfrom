@@ -214,6 +214,8 @@ export const api = {
   eprMaterials: () => f('/api/epr/materials').then(r => j<EprMaterial[]>(r)),
   eprUpdateMaterial: (id: number, body: object) =>
     f(`/api/epr/materials/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => j<any>(r)),
+  eprCreateMaterial: (body: object) =>
+    f('/api/epr/materials', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => j<any>(r)),
 
   // ── HSN Explorer ───────────────────────────────────────────
   hsnSearch: (q: string) => f(`/api/hsn/search?q=${encodeURIComponent(q)}`).then(r => j<HsnEntry[]>(r)),
@@ -298,7 +300,8 @@ export interface EprCompany {
 
 export interface EprMaterial {
   id: number; name: string; slug: string;
-  overall_weight: number; normalized_share: number;
+  overall_weight: number; target_weight: number; credit_weight: number;
+  normalized_share: number;
   active: boolean; display_order: number; company_count: number;
 }
 

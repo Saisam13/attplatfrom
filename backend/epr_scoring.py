@@ -99,11 +99,10 @@ def compute_scores(session, epr_weights: dict = None, anchor_bands: dict = None)
     target_band = bands.get('target', DEFAULT_ANCHOR_BANDS['target'])
     credit_band = bands.get('credits', DEFAULT_ANCHOR_BANDS['credits'])
 
-    # Parse weights (Q10)
+    # Parse global fallback weights (Q10) — per-material weights override these
     w = epr_weights or {}
-    wT_raw = float(w.get('target_tons', 1.0))
-    wC_raw = float(w.get('credits', 0.5))
-    wT, wC = _normalize_weights(wT_raw, wC_raw)
+    wT_global = float(w.get('target_tons', 1.0))
+    wC_global = float(w.get('credits', 0.5))
 
     # ── Load active materials ──────────────────────────────────────────────
     materials = session.query(EprMaterial).filter(EprMaterial.active == 1).all()
@@ -177,6 +176,10 @@ def compute_scores(session, epr_weights: dict = None, anchor_bands: dict = None)
             gap_score = max(0.0, target_score - credits_score)
 
             # Within-material grade (Q10: wT + wC normalized to 1)
+            # Per-material weights override the global fallback
+            mat_wT_raw = float(mat.target_weight) if mat.target_weight is not None else wT_global
+            mat_wC_raw = float(mat.credit_weight) if mat.credit_weight is not None else wC_global
+            wT, wC = _normalize_weights(mat_wT_raw, mat_wC_raw)
             # Business logic: large obligation + large gap = highest grade
             material_grade = target_score * wT + gap_score * wC
 

@@ -253,6 +253,8 @@ class EprMaterial(Base):
     name = Column(String, unique=True, nullable=False)     # 'Lithium'
     slug = Column(String, unique=True, nullable=False)     # 'lithium'
     overall_weight = Column(Float, default=1.0)            # admin-set; normalized per company
+    target_weight = Column(Float, default=0.5)             # within-material: target vs credits
+    credit_weight = Column(Float, default=0.5)             # within-material: target vs credits
     active = Column(Integer, default=1)                    # soft-disable without deleting data
     display_order = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -440,6 +442,10 @@ def _migrate():
         'raw_rows': [('row_hash', 'VARCHAR DEFAULT \'\'')],
         'api_keys': [('key_preview', 'VARCHAR DEFAULT \'\'')],
         # Q8/Q9: materialized grade columns on epr_companies
+        'epr_materials': [
+            ('target_weight', 'FLOAT DEFAULT 0.5'),
+            ('credit_weight', 'FLOAT DEFAULT 0.5'),
+        ],
         'epr_companies': [
             ('grade', 'FLOAT DEFAULT 0.0'),
             ('grade_label', "VARCHAR DEFAULT 'None'"),
