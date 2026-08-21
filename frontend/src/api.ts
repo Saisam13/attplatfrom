@@ -89,44 +89,48 @@ export interface Mover {
   tier_a: string; tier_b: string; rank_a: number; rank_b: number; rank_delta: number
 }
 
-// ── user identity (name picker, stored per-browser) ───────────
-export const user = {
-  get: () => localStorage.getItem('att_user') || '',
-  set: (name: string) => localStorage.setItem('att_user', name.trim()),
+// ── per-user login (session cookie, set by the server on login/setup) ──
+export interface AuthUser {
+  id: number; username: string; display_name: string
+  created_at: string; last_login_at: string
 }
 
-// ── shared fetch with PIN header + 401 broadcast ──────────────
-const pin = {
-  get: () => localStorage.getItem('att_pin') || '',
-  set: (p: string) => localStorage.setItem('att_pin', p),
-}
-export { pin }
+// App.tsx calls this whenever the logged-in user changes, so calls below that
+// stamp who made a change (leads, outreach, settings) have a name to send
+// without every page having to thread it through explicitly.
+let _currentUserName = ''
+export const setCurrentUserName = (n: string) => { _currentUserName = n }
 
 async function f(url: string, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers)
-  const p = pin.get()
-  if (p) headers.set('X-ATT-Pin', p)
-  const res = await fetch(url, { ...init, headers })
+  const res = await fetch(url, init)
   if (res.status === 401) {
-    window.dispatchEvent(new CustomEvent('att-pin-required'))
-    throw new Error('PIN required')
-  }
-  if (res.status === 429) {
-    // Two different things return 429 on overlapping paths: pin_gate's own
-    // attempt limiter (detail === 'too_many_attempts', exact string from
-    // main.py) and the sourcing-agent research rate limit (a descriptive
-    // message). Only the former means "not authenticated" — the latter is a
-    // normal API error and must fall through to the caller as usual.
-    let isPinLimit = false
-    try {
-      isPinLimit = (await res.clone().json())?.detail === 'too_many_attempts'
-    } catch { /* not JSON — not the pin limiter */ }
-    if (isPinLimit) {
-      window.dispatchEvent(new CustomEvent('att-pin-required', { detail: { rateLimited: true } }))
-      throw new Error('429: too many attempts')
-    }
+    window.dispatchEvent(new CustomEvent('att-auth-required'))
+    throw new Error('login required')
   }
   return res
+}
+
+export const auth = {
+  needsSetup: () => fetch('/api/auth/needs-setup').then(r => j<{ needs_setup: boolean }>(r)),
+  setup: (username: string, password: string, display_name: string) =>
+    fetch('/api/auth/setup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, display_name }),
+    }).then(r => j<{ ok: boolean; user: AuthUser }>(r)),
+  login: (username: string, password: string) =>
+    fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    }).then(r => j<{ ok: boolean; user: AuthUser }>(r)),
+  logout: () => fetch('/api/auth/logout', { method: 'POST' }).then(r => j<{ ok: boolean }>(r)),
+  me: () => fetch('/api/auth/me').then(r => j<AuthUser>(r)),
+  listUsers: () => f('/api/auth/users').then(r => j<AuthUser[]>(r)),
+  createUser: (username: string, password: string, display_name: string) =>
+    f('/api/auth/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, display_name }),
+    }).then(r => j<AuthUser>(r)),
+  deleteUser: (id: number) => f(`/api/auth/users/${id}`, { method: 'DELETE' }).then(r => j<{ ok: boolean }>(r)),
 }
 
 async function j<T>(res: Response): Promise<T> {
@@ -134,7 +138,7 @@ async function j<T>(res: Response): Promise<T> {
   return res.json()
 }
 
-/** Download URLs need the PIN as it can't ride an <a href> header — fetch as blob. */
+/** Fetch as a blob so the session cookie rides along, then trigger a save. */
 export async function download(url: string, filename: string) {
   const res = await f(url)
   if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`)
@@ -193,7 +197,7 @@ export const api = {
   saveSettings: (changes: object) =>
     f('/api/settings', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ changes, user_name: user.get() }),
+      body: JSON.stringify({ changes, user_name: _currentUserName }),
     }).then(r => j<any>(r)),
   settingsLog: () => f('/api/settings/log').then(r => j<any[]>(r)),
   testLlm: (body: object) =>
@@ -206,12 +210,6 @@ export const api = {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then(r => j<any>(r)),
-  verifyPin: (p: string) =>
-    fetch('/api/auth/verify', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin: p }),
-    }).then(r => j<{ ok: boolean; pin_required: boolean }>(r)),
-
   // ── EPR Producer Intel ─────────────────────────────────────
   eprUpload: (form: FormData) =>
     f('/api/epr/upload', { method: 'POST', body: form }).then(r => j<any>(r)),
@@ -256,17 +254,17 @@ export const api = {
   leadsSummary: () => f('/api/leads/summary').then(r => j<any>(r)),
   createLead: (body: object) =>
     f('/api/leads', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, user_name: user.get() }) })
+      body: JSON.stringify({ ...body, user_name: _currentUserName }) })
       .then(r => j<{ id: number; existing: boolean }>(r)),
   updateLead: (id: number, body: object) =>
     f(`/api/leads/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, user_name: user.get() }) }).then(r => j<Lead>(r)),
+      body: JSON.stringify({ ...body, user_name: _currentUserName }) }).then(r => j<Lead>(r)),
   deleteLead: (id: number) => f(`/api/leads/${id}`, { method: 'DELETE' }).then(r => j<any>(r)),
   transferLeadToCrm: (id: number) =>
     f(`/api/leads/${id}/transfer-to-crm`, { method: 'POST' }).then(r => j<{ ok: boolean; twenty_id: string }>(r)),
   addLeadEvent: (id: number, body: object) =>
     f(`/api/leads/${id}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, user_name: user.get() }) }).then(r => j<any>(r)),
+      body: JSON.stringify({ ...body, user_name: _currentUserName }) }).then(r => j<any>(r)),
 
   // ── Outreach ───────────────────────────────────────────────
   templates: (params: Record<string, string> = {}) =>
@@ -274,16 +272,16 @@ export const api = {
   saveTemplate: (body: object, id = 0) =>
     f(id ? `/api/outreach/templates/${id}` : '/api/outreach/templates', {
       method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, user_name: user.get() }) }).then(r => j<any>(r)),
+      body: JSON.stringify({ ...body, user_name: _currentUserName }) }).then(r => j<any>(r)),
   deleteTemplate: (id: number) =>
     f(`/api/outreach/templates/${id}`, { method: 'DELETE' }).then(r => j<any>(r)),
   draft: (body: object) =>
     f('/api/outreach/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, user_name: user.get() }) })
+      body: JSON.stringify({ ...body, user_name: _currentUserName }) })
       .then(r => j<{ draft: string; channel: string; provider: string; wa_link?: string }>(r)),
   logOutreach: (body: object) =>
     f('/api/outreach/log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, user_name: user.get() }) }).then(r => j<any>(r)),
+      body: JSON.stringify({ ...body, user_name: _currentUserName }) }).then(r => j<any>(r)),
 
   // ── Digest / cache / keys / AI test ────────────────────────
   digest: () => f('/api/digest').then(r => j<any>(r)),
@@ -293,7 +291,7 @@ export const api = {
   apiKeys: () => f('/api/keys').then(r => j<any[]>(r)),
   createApiKey: (label: string) =>
     f('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label, user_name: user.get() }) }).then(r => j<{ key: string }>(r)),
+      body: JSON.stringify({ label, user_name: _currentUserName }) }).then(r => j<{ key: string }>(r)),
   revokeApiKey: (id: number) => f(`/api/keys/${id}`, { method: 'DELETE' }).then(r => j<any>(r)),
   testAi: (kind: 'llm' | 'search') =>
     f('/api/settings/test-ai', { method: 'POST', headers: { 'Content-Type': 'application/json' },

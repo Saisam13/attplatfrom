@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { api, user } from '../api'
+import { api } from '../api'
+import { useRuns } from '../App'
 
 export function TierBadge({ tier }: { tier: string }) {
   return <span className={`tier-badge tier-${tier}`}>Tier {tier}</span>
@@ -58,11 +59,12 @@ const DURATIONS = ['<1 month', '1-3 months', '3-6 months', '6+ months']
 export function FeedbackButtons({ runId, chemical, onDone }: {
   runId: number; chemical: string; onDone?: () => void
 }) {
+  const { userName } = useRuns()
   const [modal, setModal] = useState<'challenge' | 'correct' | null>(null)
   const [sent, setSent] = useState('')
 
   const confirm = async () => {
-    await api.addFeedback({ run_id: runId, chemical, verdict: 'confirm', user_name: user.get() })
+    await api.addFeedback({ run_id: runId, chemical, verdict: 'confirm', user_name: userName })
     setSent('Confirmed')
     onDone?.()
   }
@@ -93,7 +95,8 @@ function FeedbackModal({ runId, chemical, verdict, onClose, onSubmitted }: {
   runId: number; chemical: string; verdict: 'challenge' | 'correct'
   onClose: () => void; onSubmitted: () => void
 }) {
-  const [name, setName] = useState(user.get())
+  const { userName } = useRuns()
+  const [name, setName] = useState(userName)
   const [tier, setTier] = useState('')
   const [duration, setDuration] = useState('')
   const [comment, setComment] = useState('')

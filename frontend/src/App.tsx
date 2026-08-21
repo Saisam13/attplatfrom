@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, createContext, useContext, useCallback } from 'react'
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
-import { api, download, pin, user, Run } from './api'
+import { api, auth, download, setCurrentUserName, AuthUser, Run } from './api'
 import HomePage from './pages/HomePage'
 import UploadPage from './pages/UploadPage'
 import DashboardPage from './pages/DashboardPage'
@@ -33,7 +33,6 @@ interface RunCtx {
   toast: (kind: 'success' | 'error', text: string) => void
   appSettings: any
   userName: string
-  setUserName: (n: string) => void
 }
 
 const RunContext = createContext<RunCtx>(null as any)
@@ -47,11 +46,9 @@ export default function App() {
   const [selectedBatteryId, setSelectedBatteryId] = useState<number | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [appSettings, setAppSettings] = useState<any>(null)
-  const [userName, setUserNameState] = useState(user.get())
-  const [askName, setAskName] = useState(!user.get())
-  const [pinNeeded, setPinNeeded] = useState(false)
-  const [pinChecked, setPinChecked] = useState(false)
-  const [pinRateLimited, setPinRateLimited] = useState(false)
+  const [authState, setAuthState] = useState<'loading' | 'setup' | 'login' | 'ok'>('loading')
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null)
+  const [authRateLimited, setAuthRateLimited] = useState(false)
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('att_theme') as 'dark' | 'light') || 'dark')
   const prevStatuses = useRef<Record<number, string>>({})
 
@@ -72,12 +69,12 @@ export default function App() {
       for (const r of rs) {
         const prev = prevStatuses.current[r.id]
         if (prev && (prev === 'running' || prev === 'queued') && r.status === 'done') {
-          toast('success', `Run #${r.id} “${r.name}” completed`)
-          document.title = `✓ Run done — ${BASE_TITLE}`
+          toast('success', `Run #${r.id} "${r.name}" completed`)
+          document.title = `Run done - ${BASE_TITLE}`
           setTimeout(() => { document.title = BASE_TITLE }, 30000)
         }
         if (prev && (prev === 'running' || prev === 'queued') && r.status === 'error') {
-          toast('error', `Run #${r.id} “${r.name}” failed: ${r.error}`)
+          toast('error', `Run #${r.id} "${r.name}" failed: ${r.error}`)
         }
         prevStatuses.current[r.id] = r.status
       }
@@ -98,43 +95,39 @@ export default function App() {
   }, [toast])
 
   useEffect(() => {
-    const onPin = (e: Event) => {
-      setPinNeeded(true)
-      setPinRateLimited(!!(e as CustomEvent).detail?.rateLimited)
-    }
-    window.addEventListener('att-pin-required', onPin)
-    return () => window.removeEventListener('att-pin-required', onPin)
+    const onAuthRequired = () => { setCurrentUser(null); setAuthState('login') }
+    window.addEventListener('att-auth-required', onAuthRequired)
+    return () => window.removeEventListener('att-auth-required', onAuthRequired)
   }, [])
 
-  // Preflight: verify the stored PIN (or lack of one) before rendering the app at
-  // all — without this, a hard refresh briefly (or, on a 429, indefinitely) shows
-  // the full authenticated shell while background calls silently fail, since
-  // pinNeeded previously only flipped reactively off the *next* blocked call.
+  // Preflight: check the session cookie before rendering the app at all -
+  // without this, a hard refresh would briefly show the full authenticated
+  // shell while the first real API call fails in the background.
   useEffect(() => {
-    api.verifyPin(pin.get())
-      .then(res => { if (res.pin_required && !res.ok) setPinNeeded(true) })
-      .catch((e: any) => {
-        // /api/auth/verify has its own rate limiter (a different 429 shape
-        // than pin_gate's) — treat it the same way: blocked, not "fine".
-        if (String(e?.message ?? e).startsWith('429')) {
-          setPinNeeded(true)
-          setPinRateLimited(true)
-        }
+    auth.me()
+      .then(u => { setCurrentUser(u); setAuthState('ok') })
+      .catch(() => {
+        auth.needsSetup()
+          .then(r => setAuthState(r.needs_setup ? 'setup' : 'login'))
+          .catch(() => setAuthState('login'))
       })
-      .finally(() => setPinChecked(true))
   }, [])
 
   useEffect(() => {
-    if (!pinChecked || pinNeeded) return
+    if (authState !== 'ok') return
     refresh()
     api.settings().then(setAppSettings).catch(() => {})
     const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
-  }, [refresh, pinChecked, pinNeeded])
+  }, [refresh, authState])
 
-  const setUserName = (n: string) => {
-    user.set(n)
-    setUserNameState(n.trim())
+  const userName = currentUser?.display_name || currentUser?.username || ''
+  useEffect(() => { setCurrentUserName(userName) }, [userName])
+
+  const logout = async () => {
+    try { await auth.logout() } catch { /* ignore - we're logging out regardless */ }
+    setCurrentUser(null)
+    setAuthState('login')
   }
 
   const runs = allRuns.filter(r => r.kind !== 'battery')
@@ -143,20 +136,24 @@ export default function App() {
   const selectedBatteryRun = batteryRuns.find(r => r.id === selectedBatteryId) ?? null
   const showFeedback = appSettings?.show_feedback_page !== false
 
-  if (!pinChecked) {
+  if (authState === 'loading') {
     return null
   }
 
-  if (pinNeeded) {
-    return <PinScreen rateLimited={pinRateLimited}
-      onOk={() => { setPinNeeded(false); setPinRateLimited(false); refresh(); api.settings().then(setAppSettings).catch(() => {}) }} />
+  if (authState === 'setup') {
+    return <SetupScreen onDone={u => { setCurrentUser(u); setAuthState('ok') }} />
+  }
+
+  if (authState === 'login') {
+    return <LoginScreen rateLimited={authRateLimited}
+      onOk={u => { setCurrentUser(u); setAuthRateLimited(false); setAuthState('ok') }} />
   }
 
   return (
     <RunContext.Provider value={{
       runs, batteryRuns, selectedRun, selectedBatteryRun,
       setSelectedId, setSelectedBatteryId, refresh, toast,
-      appSettings, userName, setUserName,
+      appSettings, userName,
     }}>
       <div className="layout">
         <aside className="sidebar">
@@ -189,12 +186,12 @@ export default function App() {
           <div className="user-badge" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <div>
               <span className="dim">Signed in as</span>
-              <strong>{userName || '—'}</strong>
+              <strong>{userName || '-'}</strong>
             </div>
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <button className="ghost" style={{ flex: 1 }} onClick={() => setAskName(true)}>Change</button>
+              <button className="ghost" style={{ flex: 1 }} onClick={logout}>Log out</button>
               <button className="ghost" style={{ padding: '5px 8px', fontSize: 16 }} onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} title="Toggle theme">
-                {theme === 'dark' ? '☀️' : '🌙'}
+                {theme === 'dark' ? 'Light' : 'Dark'}
               </button>
             </div>
           </div>
@@ -232,65 +229,90 @@ export default function App() {
           </div>
         ))}
       </div>
-      {askName && <NameModal current={userName} onSave={n => { setUserName(n); setAskName(false) }} />}
     </RunContext.Provider>
   )
 }
 
-function NameModal({ current, onSave }: { current: string; onSave: (n: string) => void }) {
-  const [name, setName] = useState(current)
-  return (
-    <div className="modal-overlay">
-      <div className="modal" style={{ width: 380 }}>
-        <h3>Who's using the platform?</h3>
-        <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
-          Your name is stamped on leads, feedback and settings changes so the team knows who said what.
-          No password — this is an internal tool.
-        </div>
-        <div className="field">
-          <label>Your name</label>
-          <input type="text" value={name} autoFocus onChange={e => setName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && name.trim()) onSave(name) }}
-            placeholder="e.g. Anuraag" />
-        </div>
-        <div className="actions">
-          <button disabled={!name.trim()} onClick={() => onSave(name)}>Continue</button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function PinScreen({ onOk, rateLimited }: { onOk: () => void; rateLimited?: boolean }) {
-  const [value, setValue] = useState('')
-  const [err, setErr] = useState(rateLimited ? 'Too many attempts — try again in a few minutes.' : '')
+function LoginScreen({ onOk, rateLimited }: { onOk: (u: AuthUser) => void; rateLimited?: boolean }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [err, setErr] = useState(rateLimited ? 'Too many attempts - try again in a few minutes.' : '')
+  const [busy, setBusy] = useState(false)
   const submit = async () => {
-    setErr('')
+    if (!username.trim() || !password) return
+    setErr(''); setBusy(true)
     try {
-      const res = await api.verifyPin(value)
-      if (res.ok) {
-        pin.set(value)
-        onOk()
-      } else {
-        setErr('Wrong PIN')
-      }
+      const res = await auth.login(username.trim(), password)
+      onOk(res.user)
     } catch (e: any) {
-      setErr(String(e.message || e).includes('429')
-        ? 'Too many attempts — try again in a few minutes.'
-        : String(e.message || e))
+      const msg = String(e?.message ?? e)
+      setErr(msg.startsWith('429') ? 'Too many attempts - try again in a few minutes.' : 'Invalid username or password')
+    } finally {
+      setBusy(false)
     }
   }
   return (
     <div className="pin-screen">
       <img src="/minimines-logo.svg" alt="MiniMines" style={{ width: 140, marginBottom: 18 }} />
       <h1 style={{ marginBottom: 4 }}>MiniMines Sales Hub</h1>
-      <div className="dim" style={{ marginBottom: 20 }}>This deployment is PIN-protected.</div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <input type="password" value={value} autoFocus placeholder="Team PIN" maxLength={4}
-          inputMode="numeric" pattern="[0-9]*"
-          onChange={e => setValue(e.target.value.replace(/\D/g, '').slice(0, 4))}
+      <div className="dim" style={{ marginBottom: 20 }}>Sign in to continue.</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: 260 }}>
+        <input type="text" value={username} autoFocus placeholder="Username"
+          onChange={e => setUsername(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') submit() }} />
-        <button onClick={submit}>Enter</button>
+        <input type="password" value={password} placeholder="Password"
+          onChange={e => setPassword(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }} />
+        <button disabled={busy || !username.trim() || !password} onClick={submit}>
+          {busy ? 'Signing in...' : 'Sign in'}
+        </button>
+      </div>
+      {err && <div className="error" style={{ marginTop: 10 }}>{err}</div>}
+    </div>
+  )
+}
+
+function SetupScreen({ onDone }: { onDone: (u: AuthUser) => void }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const valid = username.trim().length > 0 && password.length >= 6 && password === confirm
+  const submit = async () => {
+    if (!valid) return
+    setErr(''); setBusy(true)
+    try {
+      const res = await auth.setup(username.trim(), password, displayName.trim())
+      onDone(res.user)
+    } catch (e: any) {
+      setErr(String(e?.message ?? e).replace(/^\d+:\s*/, ''))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="pin-screen">
+      <img src="/minimines-logo.svg" alt="MiniMines" style={{ width: 140, marginBottom: 18 }} />
+      <h1 style={{ marginBottom: 4 }}>MiniMines Sales Hub</h1>
+      <div className="dim" style={{ marginBottom: 20, maxWidth: 320, textAlign: 'center' }}>
+        No account exists yet - create the first one. It becomes the admin account
+        used to add the rest of the team from Settings afterward.
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: 280 }}>
+        <input type="text" value={username} autoFocus placeholder="Username"
+          onChange={e => setUsername(e.target.value)} />
+        <input type="text" value={displayName} placeholder="Display name (optional)"
+          onChange={e => setDisplayName(e.target.value)} />
+        <input type="password" value={password} placeholder="Password (min 6 characters)"
+          onChange={e => setPassword(e.target.value)} />
+        <input type="password" value={confirm} placeholder="Confirm password"
+          onChange={e => setConfirm(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }} />
+        <button disabled={busy || !valid} onClick={submit}>
+          {busy ? 'Creating...' : 'Create account'}
+        </button>
       </div>
       {err && <div className="error" style={{ marginTop: 10 }}>{err}</div>}
     </div>

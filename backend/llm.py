@@ -1,6 +1,8 @@
 """Provider-agnostic LLM adapter for HYBRID chemical matching.
 
 Supported providers (config.json -> {"llm": {"provider": ..., "api_key": ..., "model": ...}}):
+  - "bharatrouter" (OpenAI-compatible; reuses the key from Settings -> AI providers
+    if 'api_key' isn't set here, so it doesn't need to be entered twice)
   - "anthropic" (default model claude-sonnet-5; claude-haiku-4-5-20251001 for cheap)
   - "gemini"    (default model gemini-2.5-flash)
   - "ollama"    (local; model required, base_url optional, default http://localhost:11434)
@@ -15,6 +17,7 @@ import re
 import urllib.request
 
 DEFAULT_MODELS = {
+    'bharatrouter': 'qwen2.5-7b-instruct',
     'anthropic': 'claude-sonnet-5',
     'gemini': 'gemini-2.5-flash',
     'ollama': 'llama3.1',
@@ -38,6 +41,15 @@ def _http_json(url, payload, headers, timeout=120):
         headers={'Content-Type': 'application/json', **headers}, method='POST')
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode('utf-8'))
+
+
+def _call_bharatrouter(prompt, api_key, model):
+    out = _http_json(
+        'https://api.bharatrouter.com/v1/chat/completions',
+        {'model': model, 'messages': [{'role': 'user', 'content': prompt}],
+         'temperature': 0.1, 'data_policy': 'india_only', 'optimize': 'auto'},
+        {'Authorization': f'Bearer {api_key}'})
+    return out['choices'][0]['message']['content']
 
 
 def _call_anthropic(prompt, api_key, model):
@@ -83,6 +95,13 @@ class LlmMatcher:
     def __init__(self, llm_config, session_factory, log=print):
         self.provider = (llm_config or {}).get('provider', 'off')
         self.api_key = (llm_config or {}).get('api_key', '')
+        if self.provider == 'bharatrouter' and not self.api_key:
+            # Reuse the key from Settings -> AI providers so it isn't entered twice.
+            try:
+                from . import settings
+                self.api_key = settings.get('ai_providers', {}).get('bharatrouter_key', '')
+            except Exception:
+                pass
         self.model = (llm_config or {}).get('model', '') or DEFAULT_MODELS.get(self.provider, '')
         self.base_url = (llm_config or {}).get('base_url', 'http://localhost:11434')
         self.session_factory = session_factory
@@ -92,11 +111,13 @@ class LlmMatcher:
     def enabled(self):
         if self.provider in ('off', '', None):
             return False
-        if self.provider in ('anthropic', 'gemini') and not self.api_key:
+        if self.provider in ('bharatrouter', 'anthropic', 'gemini') and not self.api_key:
             return False
-        return self.provider in ('anthropic', 'gemini', 'ollama')
+        return self.provider in ('bharatrouter', 'anthropic', 'gemini', 'ollama')
 
     def _complete(self, prompt):
+        if self.provider == 'bharatrouter':
+            return _call_bharatrouter(prompt, self.api_key, self.model)
         if self.provider == 'anthropic':
             return _call_anthropic(prompt, self.api_key, self.model)
         if self.provider == 'gemini':

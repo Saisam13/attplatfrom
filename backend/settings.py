@@ -3,10 +3,8 @@
 Settings are seeded from pipeline constants / config.json on first read so the
 platform keeps producing identical numbers until someone edits them in the UI.
 """
-import hashlib
 import json
 import os
-import secrets
 
 from .db import SessionLocal, AppSetting, SettingsLog, ROOT
 from .pipeline.constants import (
@@ -35,8 +33,6 @@ DEFAULTS = {
                                       # default; require an explicit, confirmed opt-in instead)
     'feedback_adjustment': True,    # trader feedback nudges future ATT scores (±5)
     'show_feedback_page': True,
-    'pin_enabled': False,
-    'pin_code': '',
     'llm': {'provider': 'off', 'api_key': '', 'model': '',
             'base_url': 'http://localhost:11434'},
     # Shared AI provider pool for research / drafts / HSN suggestions / /api/v1/ai
@@ -69,29 +65,7 @@ DEFAULTS = {
     },
 }
 
-def hash_pin(pin: str) -> str:
-    """R10: PIN stored as salt:sha256(salt+pin), never plaintext. A 4-6 digit
-    PIN's tiny keyspace means hashing alone can't stop brute force — rate
-    limiting (see main.py pin_gate) is the actual defense; this only protects
-    against a copied/leaked DB file directly revealing the PIN."""
-    salt = secrets.token_hex(8)
-    digest = hashlib.sha256((salt + pin).encode('utf-8')).hexdigest()
-    return f'{salt}:{digest}'
-
-
-def verify_pin(supplied: str, stored: str) -> bool:
-    if not stored:
-        return False
-    if ':' not in stored:
-        # legacy plaintext value saved before hashing was added — compare
-        # directly so an already-configured PIN doesn't suddenly lock everyone
-        # out; it gets hashed automatically the next time it's changed in Settings
-        return supplied == stored
-    salt, digest = stored.split(':', 1)
-    return hashlib.sha256((salt + supplied).encode('utf-8')).hexdigest() == digest
-
-
-SECRET_KEYS = {'pin_code'}          # returned masked
+SECRET_KEYS = {'pin_code'}          # legacy key some installs still have a DB row for — keep masked
 MASKED_SUBKEYS = {
     'llm': ['api_key'],
     'ai_providers': ['bharatrouter_key', 'groq_key', 'gemini_key', 'anthropic_key',
@@ -163,8 +137,6 @@ def update(changes: dict, user_name: str = ''):
         for key, new_val in changes.items():
             if key not in DEFAULTS:
                 continue
-            if key == 'pin_code' and isinstance(new_val, str) and new_val:
-                new_val = hash_pin(new_val)
             if isinstance(DEFAULTS[key], dict) and isinstance(new_val, dict):
                 merged = {**current.get(key, {}), **new_val}
                 new_val = merged

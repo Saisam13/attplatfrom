@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, auth, AuthUser } from '../api'
 import { useRuns } from '../App'
 
 const DIMS = ['volume', 'price', 'buyers', 'suppliers', 'trend', 'structure', 'freedom', 'barrier']
@@ -43,7 +43,7 @@ export default function SettingsPage() {
       <CachePanel toast={toast} />
       <WeightsPanel s={s} save={save} runId={selectedRun?.status === 'done' ? selectedRun.id : null} toast={toast} />
       <GeneralPanel s={s} save={save} />
-      <SecurityPanel s={s} save={save} />
+      <UsersPanel toast={toast} />
 
       <h2>Change log</h2>
       <div className="panel">
@@ -500,12 +500,17 @@ function LlmPanel({ s, save, toast }: any) {
       <div className="filters">
         <select value={provider} onChange={e => setProvider(e.target.value)}>
           <option value="off">Off (rule-based only)</option>
+          <option value="bharatrouter">Bharat Router</option>
           <option value="anthropic">Anthropic (Claude)</option>
           <option value="gemini">Google Gemini</option>
           <option value="ollama">Ollama (local)</option>
         </select>
         {provider !== 'off' && provider !== 'ollama' && (
-          <input type="password" placeholder={s.llm?.has_api_key ? 'API key saved — paste to replace' : 'API key'}
+          <input type="password"
+            placeholder={
+              s.llm?.has_api_key ? 'API key saved — paste to replace'
+              : provider === 'bharatrouter' ? 'Leave blank to reuse the AI providers key'
+              : 'API key'}
             value={apiKey} onChange={e => setApiKey(e.target.value)} style={{ width: 280 }} />
         )}
         {provider !== 'off' && (
@@ -679,32 +684,68 @@ function GeneralPanel({ s, save }: any) {
   )
 }
 
-function SecurityPanel({ s, save }: any) {
-  const [pinCode, setPinCode] = useState('')
+function UsersPanel({ toast }: any) {
+  const [users, setUsers] = useState<AuthUser[]>([])
+  const [showAdd, setShowAdd] = useState(false)
+  const [username, setUsername] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [password, setPassword] = useState('')
+
+  const load = () => { auth.listUsers().then(setUsers).catch(() => {}) }
+  useEffect(load, [])
+
+  const addUser = async () => {
+    try {
+      await auth.createUser(username.trim(), password, displayName.trim())
+      setUsername(''); setDisplayName(''); setPassword(''); setShowAdd(false)
+      toast('success', 'User added')
+      load()
+    } catch (e: any) {
+      toast('error', String(e.message || e))
+    }
+  }
+
+  const removeUser = async (u: AuthUser) => {
+    if (!confirm(`Remove ${u.username}? They will be signed out immediately.`)) return
+    try {
+      await auth.deleteUser(u.id)
+      toast('success', 'User removed')
+      load()
+    } catch (e: any) {
+      toast('error', String(e.message || e))
+    }
+  }
+
   return (
     <div className="panel">
-      <h2 style={{ marginTop: 0 }}>Security</h2>
+      <h2 style={{ marginTop: 0 }}>Users</h2>
       <div className="dim" style={{ fontSize: 13, marginBottom: 10 }}>
-        On the office LAN this can stay off. Enable the shared 4-digit PIN if the platform is ever
-        exposed beyond the office network (e.g. a cloud VM) — every browser must then enter it once.
-        Locked out after 5 wrong attempts within 5 minutes.
+        Each teammate signs in with their own username and password. Locked out after 5 wrong
+        login attempts within 5 minutes.
       </div>
-      <div className="filters">
-        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input type="checkbox" checked={!!s.pin_enabled}
-            onChange={e => save({ pin_enabled: e.target.checked },
-              e.target.checked ? 'PIN gate ENABLED' : 'PIN gate disabled')} />
-          <span>Require team PIN</span>
-        </label>
-        <input type="password" placeholder={s.pin_code ? '4-digit PIN — type to replace' : 'Set 4-digit PIN'}
-          maxLength={4} inputMode="numeric" pattern="[0-9]*"
-          value={pinCode} onChange={e => setPinCode(e.target.value.replace(/\D/g, '').slice(0, 4))}
-          style={{ width: 180 }} />
-        <button className="secondary" disabled={pinCode.length !== 4}
-          onClick={() => { save({ pin_code: pinCode }, 'PIN updated'); setPinCode('') }}>
-          Save PIN
-        </button>
-      </div>
+      <table>
+        <thead><tr><th>Username</th><th>Display name</th><th>Last login</th><th></th></tr></thead>
+        <tbody>
+          {users.map(u => (
+            <tr key={u.id}>
+              <td className="mono">{u.username}</td>
+              <td>{u.display_name}</td>
+              <td className="dim">{u.last_login_at ? new Date(u.last_login_at + 'Z').toLocaleString() : 'never'}</td>
+              <td><button className="ghost" onClick={() => removeUser(u)}>Remove</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!showAdd && <button className="secondary" style={{ marginTop: 10 }} onClick={() => setShowAdd(true)}>+ Add user</button>}
+      {showAdd && (
+        <div className="filters" style={{ marginTop: 10 }}>
+          <input placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} style={{ width: 160 }} />
+          <input placeholder="Display name (optional)" value={displayName} onChange={e => setDisplayName(e.target.value)} style={{ width: 180 }} />
+          <input type="password" placeholder="Password (min 6 chars)" value={password} onChange={e => setPassword(e.target.value)} style={{ width: 180 }} />
+          <button disabled={!username.trim() || password.length < 6} onClick={addUser}>Create</button>
+          <button className="ghost" onClick={() => setShowAdd(false)}>Cancel</button>
+        </div>
+      )}
     </div>
   )
 }

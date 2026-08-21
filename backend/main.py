@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +22,7 @@ from .db import (
 )
 from . import runner
 from . import settings
+from . import auth
 from . import cache as cache_svc
 from .llm import LlmMatcher
 from .pipeline.constants import DEFAULT_TREND_EXCLUDE
@@ -62,62 +63,110 @@ outreach.seed_templates()   # default pitch templates on first boot
 
 
 # ══════════════════════════════════════════════════════════════
-# Optional shared-PIN gate (for internet-facing deployments)
+# Per-user login (username/password + server-side session cookie)
 # ══════════════════════════════════════════════════════════════
-# R10: the PIN endpoint had no rate limit or lockout — a 4-6 digit PIN falls
-# to brute force in seconds without one. Simple in-memory sliding-window
-# limiter keyed by client IP; a single process is enough here since this gate
-# only matters for small internet-facing deployments, not a clustered one.
-_PIN_MAX_ATTEMPTS = 5
-_PIN_WINDOW_SECONDS = 300
-_pin_failures = {}
-
-
-def _pin_rate_limited(ip):
-    now = time.time()
-    attempts = [t for t in _pin_failures.get(ip, []) if now - t < _PIN_WINDOW_SECONDS]
-    _pin_failures[ip] = attempts
-    return len(attempts) >= _PIN_MAX_ATTEMPTS
-
-
-def _record_pin_failure(ip):
-    _pin_failures.setdefault(ip, []).append(time.time())
+_AUTH_PUBLIC_PATHS = {'/api/auth/setup', '/api/auth/needs-setup', '/api/auth/login', '/api/auth/logout'}
 
 
 @app.middleware('http')
-async def pin_gate(request: Request, call_next):
+async def auth_gate(request: Request, call_next):
     # /api/v1/* is the external API — it carries its own X-API-Key auth
-    if request.url.path.startswith('/api') and request.url.path != '/api/auth/verify' \
-            and not request.url.path.startswith('/api/v1/') \
-            and request.method != 'OPTIONS':
-        s = settings.get_all()
-        if s.get('pin_enabled') and s.get('pin_code'):
-            ip = request.client.host if request.client else 'unknown'
-            if _pin_rate_limited(ip):
-                return JSONResponse({'detail': 'too_many_attempts'}, status_code=429)
-            supplied = request.headers.get('x-att-pin', '')
-            if not settings.verify_pin(supplied, s['pin_code']):
-                _record_pin_failure(ip)
-                return JSONResponse({'detail': 'pin_required'}, status_code=401)
+    path = request.url.path
+    if path.startswith('/api') and path not in _AUTH_PUBLIC_PATHS \
+            and not path.startswith('/api/v1/') and request.method != 'OPTIONS':
+        token = request.cookies.get(auth.SESSION_COOKIE, '')
+        user = auth.get_session_user(token)
+        if not user:
+            return JSONResponse({'detail': 'login_required'}, status_code=401)
+        request.state.user = user
     return await call_next(request)
 
 
-class PinIn(BaseModel):
-    pin: str
+@app.get('/api/auth/needs-setup')
+def auth_needs_setup():
+    return {'needs_setup': not auth.any_users_exist()}
 
 
-@app.post('/api/auth/verify')
-def verify_pin(body: PinIn, request: Request):
-    s = settings.get_all()
-    if not s.get('pin_enabled') or not s.get('pin_code'):
-        return {'ok': True, 'pin_required': False}
+class SetupIn(BaseModel):
+    username: str
+    password: str
+    display_name: str = ''
+
+
+@app.post('/api/auth/setup')
+def auth_setup(body: SetupIn, response: Response):
+    # Only reachable while no account exists yet — a one-time bootstrap so the
+    # first admin sets their own password rather than one chosen for them.
+    if auth.any_users_exist():
+        raise HTTPException(403, 'Setup already completed — use /api/auth/login')
+    try:
+        user = auth.create_user(body.username, body.password, body.display_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = auth.create_session(user['id'])
+    response.set_cookie(auth.SESSION_COOKIE, token, httponly=True, samesite='lax',
+                        max_age=auth.SESSION_MAX_AGE_DAYS * 86400, path='/')
+    return {'ok': True, 'user': user}
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+@app.post('/api/auth/login')
+def auth_login(body: LoginIn, request: Request, response: Response):
     ip = request.client.host if request.client else 'unknown'
-    if _pin_rate_limited(ip):
+    try:
+        user = auth.authenticate(body.username, body.password, ip)
+    except PermissionError:
         raise HTTPException(429, 'Too many attempts — try again later')
-    ok = settings.verify_pin(body.pin, s['pin_code'])
-    if not ok:
-        _record_pin_failure(ip)
-    return {'ok': ok, 'pin_required': True}
+    if not user:
+        raise HTTPException(401, 'Invalid username or password')
+    token = auth.create_session(user['id'])
+    response.set_cookie(auth.SESSION_COOKIE, token, httponly=True, samesite='lax',
+                        max_age=auth.SESSION_MAX_AGE_DAYS * 86400, path='/')
+    return {'ok': True, 'user': user}
+
+
+@app.post('/api/auth/logout')
+def auth_logout(request: Request, response: Response):
+    auth.delete_session(request.cookies.get(auth.SESSION_COOKIE, ''))
+    response.delete_cookie(auth.SESSION_COOKIE, path='/')
+    return {'ok': True}
+
+
+@app.get('/api/auth/me')
+def auth_me(request: Request):
+    return request.state.user  # set by auth_gate — this path is gated, so it's always present
+
+
+@app.get('/api/auth/users')
+def auth_list_users():
+    return auth.list_users()
+
+
+class CreateUserIn(BaseModel):
+    username: str
+    password: str
+    display_name: str = ''
+
+
+@app.post('/api/auth/users')
+def auth_create_user(body: CreateUserIn):
+    try:
+        return auth.create_user(body.username, body.password, body.display_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete('/api/auth/users/{user_id}')
+def auth_delete_user(user_id: int):
+    try:
+        auth.delete_user(user_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {'ok': True}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -764,9 +813,6 @@ def put_settings(body: SettingsIn):
             raise HTTPException(400, 'weights must be numeric')
         if abs(total - 1.0) > 0.001:
             raise HTTPException(400, f'weights must sum to 1.0 (got {total:.3f})')
-    pin_code = body.changes.get('pin_code')
-    if pin_code and not (pin_code.isdigit() and len(pin_code) == 4):
-        raise HTTPException(400, 'PIN must be exactly 4 digits')
     settings.update(body.changes, body.user_name)
     return settings.public_view()
 

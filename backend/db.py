@@ -413,6 +413,26 @@ class ApiKey(Base):
     revoked = Column(Integer, default=0)
 
 
+class User(Base):
+    """A teammate's login account. Replaces the shared PIN — each person gets
+    their own username/password instead of one secret the whole team shares."""
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    display_name = Column(String, default='')
+    password_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login_at = Column(DateTime)
+
+
+class AuthSession(Base):
+    __tablename__ = 'auth_sessions'
+    token = Column(String, primary_key=True)  # opaque, random — the session cookie's value
+    user_id = Column(Integer, index=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+
+
 class AppSetting(Base):
     __tablename__ = 'app_settings'
     key = Column(String, primary_key=True)
