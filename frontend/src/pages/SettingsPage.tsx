@@ -685,8 +685,9 @@ function SecurityPanel({ s, save }: any) {
     <div className="panel">
       <h2 style={{ marginTop: 0 }}>Security</h2>
       <div className="dim" style={{ fontSize: 13, marginBottom: 10 }}>
-        On the office LAN this can stay off. Enable the shared PIN if the platform is ever
+        On the office LAN this can stay off. Enable the shared 4-digit PIN if the platform is ever
         exposed beyond the office network (e.g. a cloud VM) — every browser must then enter it once.
+        Locked out after 5 wrong attempts within 5 minutes.
       </div>
       <div className="filters">
         <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -695,9 +696,11 @@ function SecurityPanel({ s, save }: any) {
               e.target.checked ? 'PIN gate ENABLED' : 'PIN gate disabled')} />
           <span>Require team PIN</span>
         </label>
-        <input type="password" placeholder={s.pin_code ? 'PIN set — type to replace' : 'Set PIN'}
-          value={pinCode} onChange={e => setPinCode(e.target.value)} style={{ width: 180 }} />
-        <button className="secondary" disabled={!pinCode}
+        <input type="password" placeholder={s.pin_code ? '4-digit PIN — type to replace' : 'Set 4-digit PIN'}
+          maxLength={4} inputMode="numeric" pattern="[0-9]*"
+          value={pinCode} onChange={e => setPinCode(e.target.value.replace(/\D/g, '').slice(0, 4))}
+          style={{ width: 180 }} />
+        <button className="secondary" disabled={pinCode.length !== 4}
           onClick={() => { save({ pin_code: pinCode }, 'PIN updated'); setPinCode('') }}>
           Save PIN
         </button>

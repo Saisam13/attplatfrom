@@ -764,6 +764,9 @@ def put_settings(body: SettingsIn):
             raise HTTPException(400, 'weights must be numeric')
         if abs(total - 1.0) > 0.001:
             raise HTTPException(400, f'weights must sum to 1.0 (got {total:.3f})')
+    pin_code = body.changes.get('pin_code')
+    if pin_code and not (pin_code.isdigit() and len(pin_code) == 4):
+        raise HTTPException(400, 'PIN must be exactly 4 digits')
     settings.update(body.changes, body.user_name)
     return settings.public_view()
 

@@ -111,6 +111,21 @@ async function f(url: string, init?: RequestInit): Promise<Response> {
     window.dispatchEvent(new CustomEvent('att-pin-required'))
     throw new Error('PIN required')
   }
+  if (res.status === 429) {
+    // Two different things return 429 on overlapping paths: pin_gate's own
+    // attempt limiter (detail === 'too_many_attempts', exact string from
+    // main.py) and the sourcing-agent research rate limit (a descriptive
+    // message). Only the former means "not authenticated" — the latter is a
+    // normal API error and must fall through to the caller as usual.
+    let isPinLimit = false
+    try {
+      isPinLimit = (await res.clone().json())?.detail === 'too_many_attempts'
+    } catch { /* not JSON — not the pin limiter */ }
+    if (isPinLimit) {
+      window.dispatchEvent(new CustomEvent('att-pin-required', { detail: { rateLimited: true } }))
+      throw new Error('429: too many attempts')
+    }
+  }
   return res
 }
 

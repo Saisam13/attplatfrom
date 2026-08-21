@@ -50,6 +50,8 @@ export default function App() {
   const [userName, setUserNameState] = useState(user.get())
   const [askName, setAskName] = useState(!user.get())
   const [pinNeeded, setPinNeeded] = useState(false)
+  const [pinChecked, setPinChecked] = useState(false)
+  const [pinRateLimited, setPinRateLimited] = useState(false)
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('att_theme') as 'dark' | 'light') || 'dark')
   const prevStatuses = useRef<Record<number, string>>({})
 
@@ -96,17 +98,39 @@ export default function App() {
   }, [toast])
 
   useEffect(() => {
-    const onPin = () => setPinNeeded(true)
+    const onPin = (e: Event) => {
+      setPinNeeded(true)
+      setPinRateLimited(!!(e as CustomEvent).detail?.rateLimited)
+    }
     window.addEventListener('att-pin-required', onPin)
     return () => window.removeEventListener('att-pin-required', onPin)
   }, [])
 
+  // Preflight: verify the stored PIN (or lack of one) before rendering the app at
+  // all — without this, a hard refresh briefly (or, on a 429, indefinitely) shows
+  // the full authenticated shell while background calls silently fail, since
+  // pinNeeded previously only flipped reactively off the *next* blocked call.
   useEffect(() => {
+    api.verifyPin(pin.get())
+      .then(res => { if (res.pin_required && !res.ok) setPinNeeded(true) })
+      .catch((e: any) => {
+        // /api/auth/verify has its own rate limiter (a different 429 shape
+        // than pin_gate's) — treat it the same way: blocked, not "fine".
+        if (String(e?.message ?? e).startsWith('429')) {
+          setPinNeeded(true)
+          setPinRateLimited(true)
+        }
+      })
+      .finally(() => setPinChecked(true))
+  }, [])
+
+  useEffect(() => {
+    if (!pinChecked || pinNeeded) return
     refresh()
     api.settings().then(setAppSettings).catch(() => {})
     const t = setInterval(refresh, 4000)
     return () => clearInterval(t)
-  }, [refresh])
+  }, [refresh, pinChecked, pinNeeded])
 
   const setUserName = (n: string) => {
     user.set(n)
@@ -119,8 +143,13 @@ export default function App() {
   const selectedBatteryRun = batteryRuns.find(r => r.id === selectedBatteryId) ?? null
   const showFeedback = appSettings?.show_feedback_page !== false
 
+  if (!pinChecked) {
+    return null
+  }
+
   if (pinNeeded) {
-    return <PinScreen onOk={() => { setPinNeeded(false); refresh(); api.settings().then(setAppSettings).catch(() => {}) }} />
+    return <PinScreen rateLimited={pinRateLimited}
+      onOk={() => { setPinNeeded(false); setPinRateLimited(false); refresh(); api.settings().then(setAppSettings).catch(() => {}) }} />
   }
 
   return (
@@ -232,9 +261,9 @@ function NameModal({ current, onSave }: { current: string; onSave: (n: string) =
   )
 }
 
-function PinScreen({ onOk }: { onOk: () => void }) {
+function PinScreen({ onOk, rateLimited }: { onOk: () => void; rateLimited?: boolean }) {
   const [value, setValue] = useState('')
-  const [err, setErr] = useState('')
+  const [err, setErr] = useState(rateLimited ? 'Too many attempts — try again in a few minutes.' : '')
   const submit = async () => {
     setErr('')
     try {
@@ -246,7 +275,9 @@ function PinScreen({ onOk }: { onOk: () => void }) {
         setErr('Wrong PIN')
       }
     } catch (e: any) {
-      setErr(String(e.message || e))
+      setErr(String(e.message || e).includes('429')
+        ? 'Too many attempts — try again in a few minutes.'
+        : String(e.message || e))
     }
   }
   return (
@@ -255,8 +286,9 @@ function PinScreen({ onOk }: { onOk: () => void }) {
       <h1 style={{ marginBottom: 4 }}>MiniMines Sales Hub</h1>
       <div className="dim" style={{ marginBottom: 20 }}>This deployment is PIN-protected.</div>
       <div style={{ display: 'flex', gap: 8 }}>
-        <input type="password" value={value} autoFocus placeholder="Team PIN"
-          onChange={e => setValue(e.target.value)}
+        <input type="password" value={value} autoFocus placeholder="Team PIN" maxLength={4}
+          inputMode="numeric" pattern="[0-9]*"
+          onChange={e => setValue(e.target.value.replace(/\D/g, '').slice(0, 4))}
           onKeyDown={e => { if (e.key === 'Enter') submit() }} />
         <button onClick={submit}>Enter</button>
       </div>
