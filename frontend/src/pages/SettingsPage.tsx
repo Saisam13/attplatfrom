@@ -81,6 +81,7 @@ function AiProvidersPanel({ s, save, toast }: any) {
   const [keys, setKeys] = useState<Record<string, string>>({})
   const [testResult, setTestResult] = useState('')
   const [testing, setTesting] = useState('')
+  const [config, setConfig] = useState<Record<string, string>>({})
 
   const KeyInput = ({ field, label, hint }: { field: string; label: string; hint: string }) => (
     <div>
@@ -91,12 +92,27 @@ function AiProvidersPanel({ s, save, toast }: any) {
     </div>
   )
 
+  const ConfigInput = ({ field, label, hint, width = 220, placeholder }: any) => (
+    <div>
+      <label className="dim" style={{ display: 'block', marginBottom: 4 }}>{label} <span style={{ opacity: 0.7 }}>({hint})</span></label>
+      <input style={{ width }} placeholder={placeholder || ''}
+        value={config[field] ?? p[field] ?? ''}
+        onChange={e => setConfig(c => ({ ...c, [field]: e.target.value }))} />
+    </div>
+  )
+
   const apply = () => {
     const changes: any = {}
     Object.entries(keys).forEach(([k, v]) => { if (v.trim()) changes[k] = v.trim() })
     if (Object.keys(changes).length === 0) { toast('error', 'No new keys entered'); return }
     save({ ai_providers: changes }, 'AI provider keys saved')
     setKeys({})
+  }
+
+  const applyConfig = () => {
+    if (Object.keys(config).length === 0) { toast('error', 'No changes to save'); return }
+    save({ ai_providers: config }, 'AI config saved')
+    setConfig({})
   }
 
   const test = async (kind: 'llm' | 'search') => {
@@ -117,16 +133,22 @@ function AiProvidersPanel({ s, save, toast }: any) {
     <div className="panel">
       <h2 style={{ marginTop: 0 }}>AI providers (research · drafts · HSN suggest · /api/v1/ai)</h2>
       <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
-        All optional — free tiers work: Groq + Tavily are enough to start. Fallback order:
-        LLM {(p.llm_order || ['groq', 'gemini', 'anthropic']).join(' → ')} · search {(p.search_order || ['tavily', 'firecrawl']).join(' → ')}.
+        All optional — free tiers work: Groq + Tavily are enough to start. Bharat Router is always
+        tried first whenever its key is set, regardless of the order below. Fallback order:
+        LLM {(() => {
+          const order = p.llm_order || ['groq', 'gemini', 'anthropic']
+          return (order.includes('bharatrouter') ? order : ['bharatrouter', ...order]).join(' → ')
+        })()} · search {(p.search_order || ['tavily', 'firecrawl']).join(' → ')}.
         Keys are stored in the local database and never shown again.
       </div>
       <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+        <KeyInput field="bharatrouter_key" label="Bharat Router" hint="paid, INR credits — bharatrouter.com, tried first" />
         <KeyInput field="groq_key" label="Groq" hint="free — console.groq.com" />
         <KeyInput field="gemini_key" label="Gemini" hint="free — aistudio.google.com" />
         <KeyInput field="anthropic_key" label="Anthropic" hint="paid — console.anthropic.com" />
         <KeyInput field="tavily_key" label="Tavily search" hint="free 1000/mo — tavily.com" />
         <KeyInput field="firecrawl_key" label="Firecrawl search" hint="fallback — firecrawl.dev" />
+        <KeyInput field="apify_token" label="Apify token" hint="apify.com — contact/people enrichment" />
       </div>
       <div className="filters" style={{ marginTop: 14 }}>
         <button onClick={apply}>Save keys</button>
@@ -137,6 +159,23 @@ function AiProvidersPanel({ s, save, toast }: any) {
           {testing === 'search' ? 'Testing…' : 'Test search'}
         </button>
         {testResult && <span className={testResult.startsWith('✓') ? 'success' : 'error'}>{testResult}</span>}
+      </div>
+
+      <div className="dim" style={{ fontSize: 13, margin: '18px 0 12px' }}>
+        Sourcing-agent research (per-company AI search + Apify enrichment): rate-limited and
+        time-boxed to protect paid credits.
+      </div>
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+        <ConfigInput field="bharatrouter_model" label="Bharat Router model" hint="e.g. qwen2.5-7b-instruct"
+          placeholder="qwen2.5-7b-instruct" />
+        <ConfigInput field="apify_actor_id" label="Apify actor ID" hint="e.g. username~actor-name" width={260} />
+        <ConfigInput field="apify_input_template" label="Apify actor input (JSON)" hint="{company} is substituted"
+          width={320} placeholder='{"query": "{company}"}' />
+        <ConfigInput field="research_rate_limit_per_hour" label="Research rate limit" hint="calls/hour, 0=unlimited" width={140} />
+        <ConfigInput field="research_timeout_seconds" label="Research timeout" hint="max seconds per company" width={140} />
+      </div>
+      <div className="filters" style={{ marginTop: 14 }}>
+        <button onClick={applyConfig}>Save AI config</button>
       </div>
     </div>
   )

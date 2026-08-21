@@ -1,6 +1,7 @@
 """Shared AI completion layer for every module (and the /api/v1/ai gateway).
 
 Providers (keys live in settings 'ai_providers', all optional):
+  bharatrouter — OpenAI-compatible router (api.bharatrouter.com), tried first when configured
   groq      — OpenAI-compatible chat completions (free tier), default llama-3.3-70b-versatile
   gemini    — Google generative language API, default gemini-2.5-flash
   anthropic — Claude, default claude-haiku-4-5-20251001
@@ -15,7 +16,10 @@ import re
 from .llm import _http_json
 from . import cache as cache_svc
 
+DEFAULT_TIMEOUT = 90
+
 DEFAULT_MODELS = {
+    'bharatrouter': 'qwen2.5-7b-instruct',
     'groq': 'llama-3.3-70b-versatile',
     'gemini': 'gemini-2.5-flash',
     'anthropic': 'claude-haiku-4-5-20251001',
@@ -29,7 +33,23 @@ def _providers_config():
     return settings.get('ai_providers', {}) or {}
 
 
-def _call_groq(prompt, api_key, model, json_mode=False, system=''):
+def _call_bharatrouter(prompt, api_key, model, json_mode=False, system='', timeout=DEFAULT_TIMEOUT):
+    body = {
+        'model': model,
+        'messages': ([{'role': 'system', 'content': system}] if system else [])
+                    + [{'role': 'user', 'content': prompt}],
+        'temperature': 0.1,
+        'data_policy': 'india_only',
+        'optimize': 'auto',
+    }
+    if json_mode:
+        body['response_format'] = {'type': 'json_object'}
+    out = _http_json('https://api.bharatrouter.com/v1/chat/completions', body,
+                     {'Authorization': f'Bearer {api_key}'}, timeout=timeout)
+    return out['choices'][0]['message']['content']
+
+
+def _call_groq(prompt, api_key, model, json_mode=False, system='', timeout=DEFAULT_TIMEOUT):
     body = {
         'model': model,
         'messages': ([{'role': 'system', 'content': system}] if system else [])
@@ -39,49 +59,53 @@ def _call_groq(prompt, api_key, model, json_mode=False, system=''):
     if json_mode:
         body['response_format'] = {'type': 'json_object'}
     out = _http_json('https://api.groq.com/openai/v1/chat/completions', body,
-                     {'Authorization': f'Bearer {api_key}'})
+                     {'Authorization': f'Bearer {api_key}'}, timeout=timeout)
     return out['choices'][0]['message']['content']
 
 
-def _call_gemini(prompt, api_key, model, json_mode=False, system=''):
+def _call_gemini(prompt, api_key, model, json_mode=False, system='', timeout=DEFAULT_TIMEOUT):
     body = {'contents': [{'parts': [{'text': (system + '\n\n' if system else '') + prompt}]}],
             'generationConfig': {'temperature': 0.1}}
     if json_mode:
         body['generationConfig']['responseMimeType'] = 'application/json'
     out = _http_json(
         f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}',
-        body, {})
+        body, {}, timeout=timeout)
     cands = out.get('candidates', [])
     if not cands:
         raise RuntimeError('gemini: empty candidates')
     return ''.join(p.get('text', '') for p in cands[0].get('content', {}).get('parts', []))
 
 
-def _call_anthropic(prompt, api_key, model, json_mode=False, system=''):
+def _call_anthropic(prompt, api_key, model, json_mode=False, system='', timeout=DEFAULT_TIMEOUT):
     body = {'model': model, 'max_tokens': 4096,
             'messages': [{'role': 'user', 'content': prompt}]}
     if system or json_mode:
         body['system'] = (system + ' ' if system else '') + \
             ('Respond with ONLY a valid JSON object, no other text.' if json_mode else '')
     out = _http_json('https://api.anthropic.com/v1/messages', body,
-                     {'x-api-key': api_key, 'anthropic-version': '2023-06-01'})
+                     {'x-api-key': api_key, 'anthropic-version': '2023-06-01'}, timeout=timeout)
     return ''.join(b.get('text', '') for b in out.get('content', []))
 
 
-def _call_ollama(prompt, base_url, model, json_mode=False, system=''):
+def _call_ollama(prompt, base_url, model, json_mode=False, system='', timeout=600):
     body = {'model': model, 'prompt': (system + '\n\n' if system else '') + prompt,
             'stream': False}
     if json_mode:
         body['format'] = 'json'
     out = _http_json(f'{(base_url or "http://localhost:11434").rstrip("/")}/api/generate',
-                     body, {}, timeout=600)
+                     body, {}, timeout=timeout)
     return out.get('response', '')
 
 
 def available_providers():
-    """Providers that currently have a key configured, in fallback order."""
+    """Providers that currently have a key configured, in fallback order.
+    bharatrouter is tried first whenever it's configured, regardless of the
+    stored llm_order (existing installs won't have it in their saved order)."""
     cfg = _providers_config()
     order = cfg.get('llm_order') or DEFAULT_ORDER
+    if 'bharatrouter' not in order:
+        order = ['bharatrouter'] + list(order)
     out = []
     for p in order:
         if p == 'ollama' and cfg.get('ollama_model'):
@@ -91,7 +115,8 @@ def available_providers():
     return out
 
 
-def complete(prompt, json_mode=False, system='', cache_ns='ai_complete', use_cache=True):
+def complete(prompt, json_mode=False, system='', cache_ns='ai_complete', use_cache=True,
+             timeout=DEFAULT_TIMEOUT):
     """Provider-routed completion with fallback. Returns {'text', 'provider', 'model', 'cached'}.
     Raises RuntimeError if no provider is configured or all fail."""
     cache_key = json.dumps({'p': prompt, 's': system, 'j': json_mode})
@@ -109,12 +134,14 @@ def complete(prompt, json_mode=False, system='', cache_ns='ai_complete', use_cac
     for p in providers:
         model = cfg.get(f'{p}_model') or DEFAULT_MODELS[p]
         try:
-            if p == 'groq':
-                text = _call_groq(prompt, cfg['groq_key'], model, json_mode, system)
+            if p == 'bharatrouter':
+                text = _call_bharatrouter(prompt, cfg['bharatrouter_key'], model, json_mode, system, timeout)
+            elif p == 'groq':
+                text = _call_groq(prompt, cfg['groq_key'], model, json_mode, system, timeout)
             elif p == 'gemini':
-                text = _call_gemini(prompt, cfg['gemini_key'], model, json_mode, system)
+                text = _call_gemini(prompt, cfg['gemini_key'], model, json_mode, system, timeout)
             elif p == 'anthropic':
-                text = _call_anthropic(prompt, cfg['anthropic_key'], model, json_mode, system)
+                text = _call_anthropic(prompt, cfg['anthropic_key'], model, json_mode, system, timeout)
             elif p == 'ollama':
                 text = _call_ollama(prompt, cfg.get('ollama_base_url', ''), model, json_mode, system)
             else:
@@ -128,9 +155,10 @@ def complete(prompt, json_mode=False, system='', cache_ns='ai_complete', use_cac
     raise RuntimeError('All AI providers failed — ' + ' | '.join(errors))
 
 
-def complete_json(prompt, system='', cache_ns='ai_complete', use_cache=True):
+def complete_json(prompt, system='', cache_ns='ai_complete', use_cache=True, timeout=DEFAULT_TIMEOUT):
     """complete() + robust JSON extraction. Returns (data_dict, result_meta)."""
-    res = complete(prompt, json_mode=True, system=system, cache_ns=cache_ns, use_cache=use_cache)
+    res = complete(prompt, json_mode=True, system=system, cache_ns=cache_ns, use_cache=use_cache,
+                   timeout=timeout)
     text = res['text'] or ''
     try:
         return json.loads(text), res

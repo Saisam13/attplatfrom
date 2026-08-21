@@ -60,6 +60,8 @@ def v1_research(request: Request, body: ResearchIn):
     try:
         data, meta = research_svc.run_company_research(body.company, body.target_tons)
         return {'research': data, 'meta': meta}
+    except research_svc.RateLimitError as e:
+        raise HTTPException(429, str(e))
     except RuntimeError as e:
         raise HTTPException(502, str(e))
 

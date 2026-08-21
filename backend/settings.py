@@ -42,13 +42,17 @@ DEFAULTS = {
     # Shared AI provider pool for research / drafts / HSN suggestions / /api/v1/ai
     # (all keys optional; fallback follows llm_order / search_order)
     'ai_providers': {
+        'bharatrouter_key': '', 'bharatrouter_model': '',
         'groq_key': '', 'groq_model': '',
         'gemini_key': '', 'gemini_model': '',
         'anthropic_key': '', 'anthropic_model': '',
         'tavily_key': '', 'firecrawl_key': '',
+        'apify_token': '', 'apify_actor_id': '', 'apify_input_template': '',
         'ollama_model': '', 'ollama_base_url': '',
-        'llm_order': ['groq', 'gemini', 'anthropic'],
+        'llm_order': ['bharatrouter', 'groq', 'gemini', 'anthropic'],
         'search_order': ['tavily', 'firecrawl'],
+        'research_rate_limit_per_hour': 20,
+        'research_timeout_seconds': 90,
     },
     'epr_weights': {'target_tons': 1.0, 'credits': 0.5},
     'cache_ttl_days': {},           # per-namespace override, 0 = keep forever
@@ -90,8 +94,8 @@ def verify_pin(supplied: str, stored: str) -> bool:
 SECRET_KEYS = {'pin_code'}          # returned masked
 MASKED_SUBKEYS = {
     'llm': ['api_key'],
-    'ai_providers': ['groq_key', 'gemini_key', 'anthropic_key',
-                     'tavily_key', 'firecrawl_key'],
+    'ai_providers': ['bharatrouter_key', 'groq_key', 'gemini_key', 'anthropic_key',
+                     'tavily_key', 'firecrawl_key', 'apify_token'],
 }
 
 

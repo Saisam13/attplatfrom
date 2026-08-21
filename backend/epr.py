@@ -617,6 +617,8 @@ def research_company(company_id: int, refresh: bool = False):
 
     try:
         data, meta = research_svc.run_company_research(name, target)
+    except research_svc.RateLimitError as e:
+        raise HTTPException(429, str(e))
     except RuntimeError as e:
         raise HTTPException(502, str(e))
 
