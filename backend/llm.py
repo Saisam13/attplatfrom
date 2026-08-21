@@ -14,6 +14,7 @@ descriptions are never re-sent. All failures are swallowed -> rule-based fallbac
 """
 import json
 import re
+import urllib.error
 import urllib.request
 
 DEFAULT_MODELS = {
@@ -39,8 +40,20 @@ def _http_json(url, payload, headers, timeout=120):
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode('utf-8'),
         headers={'Content-Type': 'application/json', **headers}, method='POST')
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode('utf-8'))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        # Providers put the actually-useful detail (error code/message) in the
+        # response body, which urlopen's exception otherwise discards — surface
+        # it instead of a bare "HTTP Error 403: Forbidden".
+        body = e.read().decode('utf-8', errors='replace')
+        try:
+            err = json.loads(body).get('error', {})
+            detail = f"{err.get('code', '')}: {err.get('message', '')}".strip(': ') or body[:300]
+        except Exception:
+            detail = body[:300]
+        raise RuntimeError(f'HTTP {e.code} - {detail}') from e
 
 
 def _call_bharatrouter(prompt, api_key, model):
