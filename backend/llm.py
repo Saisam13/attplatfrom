@@ -37,9 +37,18 @@ DESCRIPTIONS:
 
 
 def _http_json(url, payload, headers, timeout=120):
+    # Python's default urllib User-Agent ("Python-urllib/x.y") is a common
+    # target for bot-detection WAFs (e.g. Cloudflare's Browser Integrity
+    # Check, which returns HTTP 403 "error code: 1010") in front of some
+    # provider APIs — a normal-looking one avoids tripping that specifically.
+    default_headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; MiniMinesSalesHub/1.0; +server-side)',
+        'Accept': 'application/json',
+    }
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json', **headers}, method='POST')
+        headers={**default_headers, **headers}, method='POST')
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode('utf-8'))
